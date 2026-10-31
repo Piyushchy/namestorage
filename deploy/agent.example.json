@@ -1,0 +1,10 @@
+{
+  "signaling_url": "wss://signal.example.com/",
+  "root": "/srv/storage/web",
+  "allowed_emails": ["you@gmail.com"],
+  "allow_upload": true,
+  "min_free_bytes": 1073741824,
+  "max_sessions": 3,
+  "session_max_seconds": 43200,
+  "ice_servers": ["stun:stun.l.google.com:19302"]
+}

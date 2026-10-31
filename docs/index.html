@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://accounts.google.com/gsi/; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; frame-src https://accounts.google.com/gsi/; connect-src 'self' wss: ws://localhost:* ws://127.0.0.1:* https://accounts.google.com/gsi/; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<title>namestorage</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --mute:#666; --line:#ddd; --accent:#1a5fd0; --card:#f6f7f9; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16181c; --fg:#e8e8e8; --mute:#9aa; --line:#2c3038; --accent:#6ea2ff; --card:#1e2127; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .mute { color: var(--mute); }
+  .card { background: var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-top:16px; }
+  button { font:inherit; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  button.link { border:0; background:none; color:var(--accent); padding:0; }
+  table { width:100%; border-collapse:collapse; margin-top:12px; }
+  td, th { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
+  td.n, th.n { text-align:right; white-space:nowrap; }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  progress { width:100%; margin-top:12px; }
+  #drop.over { outline:2px dashed var(--accent); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>namestorage</h1>
+  <div class="mute" id="status">Sign in to continue.</div>
+
+  <section class="card" id="login">
+    <div id="gbtn"></div>
+    <div class="bar"><button class="primary" id="connect" hidden>Connect to storage</button></div>
+  </section>
+
+  <section class="card" id="files" hidden>
+    <div id="crumbs"></div>
+    <div class="bar">
+      <button id="up">Upload files</button>
+      <button id="mk">New folder</button>
+      <button id="cancel" hidden>Cancel transfer</button>
+      <input type="file" id="picker" multiple hidden>
+    </div>
+    <progress id="prog" max="100" value="0" hidden></progress>
+    <div id="drop"><table>
+      <thead><tr><th>Name</th><th class="n">Size</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </section>
+</main>
+<script src="config.js"></script>
+<script src="app.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</body>
+</html>

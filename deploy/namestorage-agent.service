@@ -1,0 +1,21 @@
+[Unit]
+Description=namestorage laptop agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=nsagent
+Group=nsagent
+WorkingDirectory=/opt/namestorage
+EnvironmentFile=/etc/namestorage/agent.env
+ExecStart=/opt/namestorage/venv/bin/python -m namestorage.agent /etc/namestorage/agent.json
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/storage/web
+
+[Install]
+WantedBy=multi-user.target
