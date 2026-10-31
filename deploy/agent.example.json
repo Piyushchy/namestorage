@@ -3,6 +3,7 @@
   "root": "/srv/storage/web",
   "allowed_emails": ["you@gmail.com"],
   "allow_upload": true,
+  "allow_delete": true,
   "min_free_bytes": 1073741824,
   "max_sessions": 3,
   "session_max_seconds": 43200,

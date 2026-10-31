@@ -11,6 +11,7 @@ import logging
 import os
 import secrets
 import shutil
+import stat
 import time
 
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
@@ -103,6 +104,8 @@ class Session:
             return self.op_upload_end(rid)
         if op == "mkdir":
             return self.op_mkdir(rid, req)
+        if op == "delete":
+            return self.op_delete(rid, req)
         self.send({"id": rid, "ok": False, "error": "unknown operation"})
 
     # --- operations -------------------------------------------------------------------------
@@ -129,7 +132,8 @@ class Session:
                     break
         entries.sort(key=lambda x: (not x["dir"], x["name"].lower()))
         self.send({"id": rid, "ok": True, "entries": entries, "email": self.email,
-                   "caps": {"upload": bool(self.cfg.get("allow_upload", False))}})
+                   "caps": {"upload": bool(self.cfg.get("allow_upload", False)),
+                            "delete": bool(self.cfg.get("allow_delete", False))}})
 
     async def op_download(self, rid, path):
         target = resolve(self.root, path)
@@ -232,6 +236,31 @@ class Session:
         new = os.path.join(parent, name)
         os.mkdir(new)
         self.agent.set_record(new, self.email, os.stat(new))
+        self.send({"id": rid, "ok": True})
+
+    def op_delete(self, rid, req):
+        if not self.cfg.get("allow_delete", False):
+            return self.send({"id": rid, "ok": False, "error": "deleting is disabled on this laptop"})
+        name = req.get("name")
+        if not valid_name(name):
+            return self.send({"id": rid, "ok": False, "error": "bad name"})
+        parent = resolve(self.root, req.get("path", "/"))
+        target = os.path.join(parent, name)
+        try:
+            mode = os.lstat(target).st_mode
+        except FileNotFoundError:
+            return self.send({"id": rid, "ok": False, "error": "not found"})
+        if stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            return self.send({"id": rid, "ok": False, "error": "not allowed"})
+        if stat.S_ISDIR(mode):
+            try:
+                os.rmdir(target)
+            except OSError:
+                return self.send({"id": rid, "ok": False, "error": "folder is not empty"})
+        else:
+            os.unlink(target)
+        log.info("%s delete /%s", self.email, os.path.relpath(target, self.root))
+        self.agent.drop_record(target)
         self.send({"id": rid, "ok": True})
 
 
