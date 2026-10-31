@@ -63,9 +63,10 @@ async def stack(tmp_path, monkeypatch):
     server = await serve(hub.handler, "127.0.0.1", 0, max_size=65536)
     port = server.sockets[0].getsockname()[1]
     url = f"ws://127.0.0.1:{port}"
-    cfg = {"root": str(root), "allowed_emails": [ME], "signaling_url": url, "allow_upload": True,
+    cfg = {"root": str(root), "allowed_emails": [ME], "signaling_url": url, "allow_upload": True, "allow_delete": True,
            "min_free_bytes": 0, "ice_servers": []}
     agent = Agent(cfg, SECRET)
+    hub.test_agent = agent
     task = asyncio.create_task(agent.run())
     for _ in range(100):
         if hub.agent:
@@ -147,4 +148,68 @@ async def test_agent_rejects_forged_ticket(stack):
     await hub.agent.send(json.dumps({"type": "offer", "sid": "forged-sid", "sdp": sdp, "ticket": bad}))
     reply = await asyncio.wait_for(fut, 10)
     assert reply["type"] == "reject"
+    await b.pc.close()
+
+
+async def test_records_and_delete(stack):
+    url, root, tmp, hub = stack
+    b = Browser()
+    assert (await b.open(url, ME))["type"] == "answer"
+
+    # a file that was not uploaded through the site has no record
+    r = await b.call("list", path="/")
+    assert r["caps"] == {"upload": True, "delete": True} and r["email"] == ME
+    assert "by" not in r["entries"][0]
+
+    # upload and mkdir leave a record: who and when
+    assert (await b.call("mkdir", path="/", name="docs"))["ok"]
+    assert (await b.call("upload_start", path="/docs", name="a.txt", size=3))["ok"]
+    b.dc.send(b"abc")
+    assert (await b.call("upload_end"))["ok"]
+    r = await b.call("list", path="/docs")
+    e = r["entries"][0]
+    assert e["name"] == "a.txt" and e["by"] == ME and abs(e["at"] - __import__("time").time()) < 30
+    top = {x["name"]: x for x in (await b.call("list", path="/"))["entries"]}
+    assert top["docs"]["by"] == ME and "by" not in top["hello.txt"]
+
+    # the record file exists but is hidden and untouchable
+    assert (root / ".namestorage-meta.json").exists()
+    assert ".namestorage-meta.json" not in top
+    for op, kw in [("download", {"path": "/.namestorage-meta.json"}),
+                   ("delete", {"path": "/", "name": ".namestorage-meta.json"}),
+                   ("upload_start", {"path": "/", "name": ".namestorage-meta.json", "size": 1}),
+                   ("mkdir", {"path": "/", "name": ".namestorage-meta.json"})]:
+        assert not (await b.call(op, **kw))["ok"], op
+
+    # a file replaced outside the site loses its (now wrong) record
+    (root / "docs" / "a.txt").write_text("changed on disk")
+    assert "by" not in (await b.call("list", path="/docs"))["entries"][0]
+
+    # delete: non-empty folder refused, then file, then folder; records go away
+    assert not (await b.call("delete", path="/", name="docs"))["ok"]
+    assert (await b.call("delete", path="/docs", name="a.txt"))["ok"]
+    assert not (root / "docs" / "a.txt").exists()
+    assert (await b.call("delete", path="/", name="docs"))["ok"]
+    assert not (root / "docs").exists()
+    import json as _j
+    assert _j.loads((root / ".namestorage-meta.json").read_text())["items"] == {}
+    assert not (await b.call("delete", path="/", name="nothing"))["ok"]
+
+    # escapes and symlinks are refused
+    assert not (await b.call("delete", path="/", name="../outside.txt"))["ok"]
+    assert not (await b.call("delete", path="/../", name="outside.txt"))["ok"]
+    os.symlink(tmp / "outside.txt", root / "link")
+    assert not (await b.call("delete", path="/", name="link"))["ok"]
+    assert (tmp / "outside.txt").exists()
+    await b.pc.close()
+
+
+async def test_delete_disabled_by_default(stack):
+    url, root, tmp, hub = stack
+    hub.test_agent.cfg["allow_delete"] = False  # the fixture enables it; check the off state
+    b = Browser()
+    assert (await b.open(url, ME))["type"] == "answer"
+    assert (await b.call("list", path="/"))["caps"]["delete"] is False
+    assert not (await b.call("delete", path="/", name="hello.txt"))["ok"]
+    assert (root / "hello.txt").exists()
     await b.pc.close()
