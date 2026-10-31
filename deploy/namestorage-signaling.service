@@ -1,0 +1,20 @@
+[Unit]
+Description=namestorage signaling server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=nsagent
+Group=nsagent
+WorkingDirectory=/opt/namestorage
+EnvironmentFile=/etc/namestorage/signaling.env
+ExecStart=/opt/namestorage/venv/bin/python -m namestorage.signaling
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
