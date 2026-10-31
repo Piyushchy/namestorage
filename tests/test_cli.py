@@ -124,6 +124,7 @@ def test_interactive_wizard_asks_validates_and_confirms(env, monkeypatch, capsys
         str(root),                            # folder
         "",                                   # uploads: default yes
         "y",                                  # deleting
+        "n",                                  # no Tailscale Funnel
         "wss://box.ts.net",                   # signaling address
         "",                                   # confirm: default yes
     ])
@@ -138,7 +139,7 @@ def test_interactive_wizard_asks_validates_and_confirms(env, monkeypatch, capsys
 
 def test_declining_the_confirmation_changes_nothing(env, monkeypatch):
     cfg, root = env
-    answers = iter([CID, "me@example.com", "https://me.github.io", str(root), "", "", "wss://box.ts.net", "n"])
+    answers = iter([CID, "me@example.com", "https://me.github.io", str(root), "", "", "n", "wss://box.ts.net", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     assert cli.main(["setup"]) == 1
     assert not (cfg / "settings.json").exists()
@@ -226,3 +227,87 @@ def test_a_service_that_fails_is_reported_with_its_log(env, monkeypatch, capsys)
     cap = capsys.readouterr()
     assert "namestorage-signaling is failed" in cap.out and "address already in use" in cap.out
     assert "did not start" in cap.err
+
+
+# ------------------------------------------------------------------ funnel
+class FakeTailscale:
+    """Stands in for subprocess.run so no real tailscale or network is used."""
+    def __init__(self, logged_in=True, funnel_results=(0,), dns="laptop.tail1234.ts.net."):
+        self.logged_in, self.funnel_results, self.dns, self.calls = logged_in, list(funnel_results), dns, []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(cmd)
+        out, rc = "", 0
+        if isinstance(cmd, str):                       # the installer one-liner
+            rc = 0
+        elif cmd[1] == "status" and "--json" in cmd:
+            out = json.dumps({"Self": {"DNSName": self.dns}})
+        elif cmd[1] == "status":
+            rc = 0 if self.logged_in else 1
+        elif cmd[1] == "up":
+            self.logged_in = True
+        elif cmd[1] == "funnel":
+            rc = self.funnel_results.pop(0) if self.funnel_results else 0
+        return type("R", (), {"returncode": rc, "stdout": out, "stderr": ""})()
+
+
+def run_wizard(env, monkeypatch, answers, tailscale=None, installed=True):
+    cfg, root = env
+    answers = iter([CID, "me@example.com", "https://me.github.io", str(root), "", "", *answers])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    if tailscale:
+        monkeypatch.setattr(cli.subprocess, "run", tailscale)
+    monkeypatch.setattr(cli.shutil, "which", lambda n: "/usr/bin/tailscale" if installed and n == "tailscale" else None)
+    return cli.main(["setup"])
+
+
+def test_funnel_gives_the_public_address(env, monkeypatch):
+    ts = FakeTailscale()
+    assert run_wizard(env, monkeypatch, ["y", ""], ts) == 0        # use Funnel, confirm
+    assert settings(env[0])["signaling_url"] == "wss://laptop.tail1234.ts.net"
+    assert ["/usr/bin/tailscale", "funnel", "--bg", "8765"] in ts.calls     # background mode
+
+
+def test_declining_funnel_asks_for_an_address(env, monkeypatch):
+    ts = FakeTailscale()
+    assert run_wizard(env, monkeypatch, ["n", "wss://my.example.com", ""], ts) == 0
+    assert settings(env[0])["signaling_url"] == "wss://my.example.com"
+    assert not any(isinstance(c, list) and c[1] == "funnel" for c in ts.calls)
+
+
+def test_tailscale_not_installed_and_install_declined(env, monkeypatch):
+    # y: use Funnel, n: do not install, then type the address by hand, confirm
+    assert run_wizard(env, monkeypatch, ["y", "n", "wss://my.example.com", ""], FakeTailscale(), installed=False) == 0
+    assert settings(env[0])["signaling_url"] == "wss://my.example.com"
+
+
+def test_logs_in_when_needed_and_retries_a_failed_funnel(env, monkeypatch):
+    ts = FakeTailscale(logged_in=False, funnel_results=(1, 0))
+    assert run_wizard(env, monkeypatch, ["y", "y", ""], ts) == 0   # use Funnel, retry after failure, confirm
+    assert ["/usr/bin/tailscale", "up"] in ts.calls
+    assert sum(1 for c in ts.calls if isinstance(c, list) and c[1] == "funnel") == 2
+    assert settings(env[0])["signaling_url"] == "wss://laptop.tail1234.ts.net"
+
+
+def test_giving_up_on_funnel_falls_back_to_typing(env, monkeypatch):
+    ts = FakeTailscale(funnel_results=(1,))
+    assert run_wizard(env, monkeypatch, ["y", "n", "wss://my.example.com", ""], ts) == 0
+    assert settings(env[0])["signaling_url"] == "wss://my.example.com"
+
+
+def test_rerun_can_keep_the_current_address(env, monkeypatch):
+    cfg, root = env
+    cli.main(setup_args(root))
+    answers = iter(["", "", "", "", "", "", "", ""])    # accept every default, keep address, confirm
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert cli.main(["setup"]) == 0
+    assert settings(cfg)["signaling_url"] == "wss://box.ts.net"
+
+
+def test_non_interactive_funnel_flag(env, monkeypatch):
+    cfg, root = env
+    monkeypatch.setattr(cli.subprocess, "run", FakeTailscale())
+    monkeypatch.setattr(cli.shutil, "which", lambda n: "/usr/bin/tailscale")
+    args = [a for a in setup_args(root) if a not in ("--signaling-url", "https://box.ts.net/")]
+    assert cli.main(args + ["--funnel"]) == 0
+    assert settings(cfg)["signaling_url"] == "wss://laptop.tail1234.ts.net"

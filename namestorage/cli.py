@@ -407,6 +407,55 @@ def summary(s):
     ])
 
 
+def run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def tailscale_dns(ts):
+    """This machine's public Tailscale name, e.g. laptop.tail1234.ts.net, or None."""
+    r = run([ts, "status", "--json"])
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)["Self"]["DNSName"].rstrip(".") or None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def setup_funnel(port, interactive=True):
+    """Install and log in to Tailscale if needed, publish the port with Funnel in the background
+    (so it survives the terminal) and return the wss:// address, or None if it did not work."""
+    ts = shutil.which("tailscale")
+    if not ts:
+        if not interactive or not ask_yn("Tailscale is not installed. Install it now "
+                                         "(runs the official installer from tailscale.com)?", True):
+            return None
+        r = subprocess.run("curl -fsSL https://tailscale.com/install.sh | sh", shell=True)
+        ts = shutil.which("tailscale")
+        if r.returncode != 0 or not ts:
+            print("  x Could not install Tailscale.")
+            return None
+    if run([ts, "status"]).returncode != 0:
+        print("Log in to Tailscale: open the link it prints, sign in, then come back here.")
+        if subprocess.run([ts, "up"]).returncode != 0:
+            print("  x Tailscale login did not finish.")
+            return None
+    for attempt in range(3):
+        # Output is shown, not captured: if Funnel is off on your tailnet, Tailscale prints a
+        # link to enable it and waits for you.
+        if subprocess.run([ts, "funnel", "--bg", str(port)]).returncode == 0:
+            break
+        if not interactive or attempt == 2 or not ask_yn("Funnel did not start. Fix what it says above, then retry?", True):
+            print("  x Could not start Funnel.")
+            return None
+    dns = tailscale_dns(ts)
+    if not dns:
+        print("  x Funnel is running, but this machine's Tailscale address could not be read.")
+        return None
+    print(f"  ok  Funnel publishes port {port} at https://{dns}")
+    return "wss://" + dns
+
+
 def collect(args, s):
     """Fill in s from flags, then (unless --yes) from questions with current values as defaults."""
     interactive = not args.yes
@@ -452,10 +501,20 @@ def collect(args, s):
 
     if args.signaling_url:
         s["signaling_url"] = args.signaling_url
+    elif args.funnel:
+        url = setup_funnel(s["port"], interactive)
+        if url:
+            s["signaling_url"] = url
     elif interactive:
-        s["signaling_url"] = ask(
-            "Public signaling address (wss://...)", s["signaling_url"], norm_ws_url,
-            "How browsers reach the signaling server on this laptop.")
+        keep = bool(s["signaling_url"]) and ask_yn(f"Keep the current public address ({s['signaling_url']})?", True)
+        if not keep:
+            url = None
+            if args.funnel is not False and ask_yn(
+                    "Publish the signaling server for free with Tailscale Funnel?", True):
+                url = setup_funnel(s["port"])
+            s["signaling_url"] = url or ask(
+                "Public signaling address (wss://...)", s["signaling_url"], norm_ws_url,
+                "How browsers reach the signaling server on this laptop.")
 
     if len(s["secret"]) < 32:
         s["secret"] = secrets.token_hex(32)
@@ -524,6 +583,8 @@ def build_parser():
     s.add_argument("--email", action="append", type=argtype(norm_email), help="repeat for several emails")
     s.add_argument("--origin", action="append", type=argtype(norm_origin), help="repeat for several origins")
     s.add_argument("--signaling-url", type=argtype(norm_ws_url))
+    s.add_argument("--funnel", action=argparse.BooleanOptionalAction, default=None,
+                   help="publish the signaling server with Tailscale Funnel (--no-funnel to skip the question)")
     s.add_argument("--root", type=argtype(norm_root))
     s.add_argument("--allow-upload", type=argtype(norm_bool), metavar="on|off")
     s.add_argument("--allow-delete", type=argtype(norm_bool), metavar="on|off")
