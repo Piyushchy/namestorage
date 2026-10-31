@@ -3,55 +3,92 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://accounts.google.com/gsi/; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; frame-src https://accounts.google.com/gsi/; connect-src 'self' wss: ws://localhost:* ws://127.0.0.1:* https://accounts.google.com/gsi/; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <title>namestorage</title>
-<style>
-  :root { --bg:#fff; --fg:#1a1a1a; --mute:#666; --line:#ddd; --accent:#1a5fd0; --card:#f6f7f9; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#16181c; --fg:#e8e8e8; --mute:#9aa; --line:#2c3038; --accent:#6ea2ff; --card:#1e2127; } }
-  * { box-sizing: border-box; }
-  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
-  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  .mute { color: var(--mute); }
-  .card { background: var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-top:16px; }
-  button { font:inherit; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer; }
-  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
-  button:disabled { opacity:.5; cursor:default; }
-  button.link { border:0; background:none; color:var(--accent); padding:0; }
-  table { width:100%; border-collapse:collapse; margin-top:12px; }
-  td, th { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
-  td.n, th.n { text-align:right; white-space:nowrap; }
-  .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
-  progress { width:100%; margin-top:12px; }
-  #drop.over { outline:2px dashed var(--accent); }
-  [hidden] { display:none !important; }
-</style>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='5' width='20' height='14' rx='4' fill='%230e6b5a'/%3E%3Ccircle cx='7' cy='12' r='1.6' fill='white'/%3E%3Crect x='11' y='11' width='8' height='2' rx='1' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-<main>
-  <h1>namestorage</h1>
-  <div class="mute" id="status">Sign in to continue.</div>
+<div class="wrap">
 
-  <section class="card" id="login">
-    <div id="gbtn"></div>
-    <div class="bar"><button class="primary" id="connect" hidden>Connect to storage</button></div>
-  </section>
-
-  <section class="card" id="files" hidden>
-    <div id="crumbs"></div>
-    <div class="bar">
-      <button id="up">Upload files</button>
-      <button id="mk">New folder</button>
-      <button id="cancel" hidden>Cancel transfer</button>
-      <input type="file" id="picker" multiple hidden>
+  <header class="top">
+    <a class="brand" href="./">
+      <span class="mark" data-i="drive"></span>
+      <span>namestorage</span>
+    </a>
+    <div class="right">
+      <span class="who" id="who" hidden></span>
+      <span class="pill" id="pill" data-kind="idle"><i></i><span id="state">Signed out</span></span>
+      <button class="btn ghost small" id="disconnect" hidden>Disconnect</button>
     </div>
-    <progress id="prog" max="100" value="0" hidden></progress>
-    <div id="drop"><table>
-      <thead><tr><th>Name</th><th class="n">Size</th><th></th></tr></thead>
-      <tbody id="rows"></tbody>
-    </table></div>
-  </section>
-</main>
+  </header>
+
+  <div id="msg" class="msg" role="status" aria-live="polite" hidden></div>
+
+  <main>
+    <section id="login" class="panel login">
+      <h1>Your files, straight from your laptop.</h1>
+      <p class="lede">Sign in with Google and this browser connects directly to your laptop. Files never pass through a server.</p>
+      <div id="gbtn" class="gbtn"></div>
+      <button class="btn primary" id="connect" hidden>Try connecting again</button>
+      <p class="fine">Only accounts on the allow-list can connect. Your laptop must be switched on.</p>
+    </section>
+
+    <section id="files" class="panel files" hidden>
+      <div class="toolbar">
+        <nav id="crumbs" class="crumbs" aria-label="Current folder"></nav>
+        <div class="actions">
+          <button class="btn" id="mk" hidden><span class="ic" data-i="folderPlus"></span>New folder</button>
+          <button class="btn primary" id="up" hidden><span class="ic" data-i="upload"></span>Upload</button>
+          <input type="file" id="picker" multiple hidden>
+        </div>
+      </div>
+
+      <div id="xfer" class="xfer" hidden>
+        <div class="xtop">
+          <span id="xname" class="xname"></span>
+          <span id="xpct" class="xpct"></span>
+          <button class="btn small" id="cancel" hidden>Cancel</button>
+        </div>
+        <progress id="prog" max="100" value="0"></progress>
+      </div>
+
+      <div id="drop" class="listing">
+        <table id="tbl">
+          <thead>
+            <tr>
+              <th class="c-name"><button class="sort" data-sort="name">Name<span class="arrow"></span></button></th>
+              <th class="c-size n"><button class="sort" data-sort="size">Size<span class="arrow"></span></button></th>
+              <th class="c-date"><button class="sort" data-sort="date">Uploaded<span class="arrow"></span></button></th>
+              <th class="c-by">By</th>
+              <th class="c-act"><span class="sr">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div id="empty" class="empty" hidden>
+          <span class="ic big" data-i="folder"></span>
+          <p>This folder is empty.</p>
+          <p class="fine">Drop files anywhere here, or use Upload.</p>
+        </div>
+        <div class="veil" aria-hidden="true"><span class="ic big" data-i="upload"></span>Drop to upload here</div>
+      </div>
+    </section>
+  </main>
+
+  <noscript><p class="msg err">This page needs JavaScript.</p></noscript>
+</div>
+
+<dialog id="confirm" aria-labelledby="ctitle">
+  <h2 id="ctitle">Delete?</h2>
+  <p id="cbody"></p>
+  <div class="dlgbtns">
+    <button class="btn" id="cno">Cancel</button>
+    <button class="btn danger" id="cyes">Delete</button>
+  </div>
+</dialog>
+
 <script src="config.js"></script>
 <script src="app.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
