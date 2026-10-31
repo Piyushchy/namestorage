@@ -40,7 +40,7 @@ The suite covers path escapes (including symlinks), ticket forgery/expiry/mismat
 ## Setup
 
 ### 1. Google sign-in client
-In Google Cloud Console create an OAuth client of type **Web application** and add these **Authorized JavaScript origins**: `https://files.symmetrically.tech` and `http://localhost:8000` (for testing). Put the client ID in `docs/config.js`. (Menu names change; follow Google's current "Sign in with Google for Web" guide.)
+In Google Cloud Console create an OAuth client of type **Web application** and add these **Authorized JavaScript origins**: `https://piyushchy.github.io` and `http://localhost:8000` (for testing). Put the client ID in `docs/config.js`. (Menu names change; follow Google's current "Sign in with Google for Web" guide.)
 
 ### 2. Signaling server
 Needs any always-on host with a public HTTPS/WSS address (a small VPS, or a free app host; compare current free-tier terms yourself).
@@ -71,7 +71,7 @@ journalctl -u namestorage-agent -f
 `root` should be a **dedicated folder**, not your whole disk.
 
 ### 4. The website
-Repo Settings > Pages > deploy from branch `main`, folder `/docs`. In your DNS add a `CNAME` record: `files` -> `<github-username>.github.io`. `docs/CNAME` already names `files.symmetrically.tech`. Enable "Enforce HTTPS" once GitHub issues the certificate.
+Repo Settings > Pages > deploy from branch `main`, folder `/docs`. The site is then free at `https://piyushchy.github.io/namestorage/`. (A custom domain is optional: add a `docs/CNAME` file and a DNS CNAME record, and update the allowed origins.)
 
 ## Not included yet
 Delete/rename, resumable transfers, per-user folders, share links, a TURN relay.

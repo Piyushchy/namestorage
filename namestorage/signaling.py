@@ -3,7 +3,7 @@
 It carries only a few KB of connection setup per session and never sees file data.
 Config (environment): GOOGLE_CLIENT_ID, ALLOWED_EMAILS (comma separated),
 NAMESTORAGE_SECRET (>=32 chars, shared with the agent), ALLOWED_ORIGINS
-(comma separated, e.g. https://files.symmetrically.tech), HOST, PORT,
+(comma separated, e.g. https://piyushchy.github.io), HOST, PORT,
 TRUST_PROXY=1 if behind a reverse proxy that sets X-Forwarded-For.
 """
 import asyncio
