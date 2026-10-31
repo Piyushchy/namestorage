@@ -16,7 +16,7 @@ import time
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from websockets.asyncio.client import connect
 
-from .paths import PathError, resolve, valid_name
+from .paths import META_NAME, PathError, resolve, valid_name
 from .ticket import TicketError, verify_ticket
 
 CHUNK = 16 * 1024
@@ -113,18 +113,23 @@ class Session:
         entries = []
         with os.scandir(d) as it:
             for e in it:
-                if e.is_symlink() or e.name.endswith(".nspart"):
+                if e.is_symlink() or e.name.endswith(".nspart") or e.name == META_NAME:
                     continue
                 try:
                     st = e.stat(follow_symlinks=False)
                 except OSError:
                     continue
-                entries.append({"name": e.name, "dir": e.is_dir(follow_symlinks=False),
-                                "size": st.st_size, "mtime": int(st.st_mtime)})
+                is_dir = e.is_dir(follow_symlinks=False)
+                item = {"name": e.name, "dir": is_dir, "size": st.st_size, "mtime": int(st.st_mtime)}
+                rec = self.agent.record_for(os.path.join(d, e.name), st, is_dir)
+                if rec:
+                    item["by"], item["at"] = rec["by"], rec["at"]
+                entries.append(item)
                 if len(entries) >= MAX_LIST:
                     break
         entries.sort(key=lambda x: (not x["dir"], x["name"].lower()))
-        self.send({"id": rid, "ok": True, "entries": entries})
+        self.send({"id": rid, "ok": True, "entries": entries, "email": self.email,
+                   "caps": {"upload": bool(self.cfg.get("allow_upload", False))}})
 
     async def op_download(self, rid, path):
         target = resolve(self.root, path)
@@ -202,6 +207,10 @@ class Session:
                 os.unlink(u["tmp"])
                 return self.send({"id": rid, "ok": False, "error": "a file with that name already exists"})
             os.rename(u["tmp"], u["final"])
+        try:
+            self.agent.set_record(u["final"], self.email, os.stat(u["final"]))
+        except OSError:
+            log.warning("%s: could not record upload of %s", self.email, u["final"])
         self.send({"id": rid, "ok": True})
 
     def abort_upload(self):
@@ -220,7 +229,9 @@ class Session:
         if not valid_name(name):
             return self.send({"id": rid, "ok": False, "error": "bad folder name"})
         parent = resolve(self.root, req.get("path", "/"))
-        os.mkdir(os.path.join(parent, name))
+        new = os.path.join(parent, name)
+        os.mkdir(new)
+        self.agent.set_record(new, self.email, os.stat(new))
         self.send({"id": rid, "ok": True})
 
 
@@ -235,6 +246,55 @@ class Agent:
         self.sessions = set()
         self.seen = {}  # sid -> expiry, blocks ticket replay
         self.tasks = set()
+        self.meta_path = os.path.join(self.root, META_NAME)
+        self.meta = self._load_meta()
+
+    # --- who uploaded what, and when (hidden JSON file inside the root) ----------------------
+    def _load_meta(self):
+        try:
+            with open(self.meta_path) as f:
+                items = json.load(f)["items"]
+            return items if isinstance(items, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except (ValueError, KeyError, OSError):
+            log.warning("could not read %s, starting with empty records", self.meta_path)
+            return {}
+
+    def _save_meta(self):
+        tmp = self.meta_path + ".nspart"
+        with open(tmp, "w") as f:
+            json.dump({"v": 1, "items": self.meta}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.meta_path)
+
+    def _key(self, path):
+        return os.path.relpath(path, self.root).replace(os.sep, "/")
+
+    def set_record(self, path, email, st):
+        self.meta[self._key(path)] = {"by": email, "at": int(time.time()),
+                                      "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+        try:
+            self._save_meta()
+        except OSError as e:
+            log.warning("could not save records: %s", e)
+
+    def drop_record(self, path):
+        if self.meta.pop(self._key(path), None) is not None:
+            try:
+                self._save_meta()
+            except OSError as e:
+                log.warning("could not save records: %s", e)
+
+    def record_for(self, path, st, is_dir):
+        """The upload record for a path, only if the file still looks like the one that was uploaded."""
+        rec = self.meta.get(self._key(path))
+        if not isinstance(rec, dict) or not isinstance(rec.get("by"), str) or not isinstance(rec.get("at"), int):
+            return None
+        if not is_dir and (rec.get("size") != st.st_size or rec.get("mtime_ns") != st.st_mtime_ns):
+            return None
+        return rec
 
     async def run(self):
         backoff = 1
