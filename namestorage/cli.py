@@ -3,18 +3,28 @@
 Every setting lives in ONE file, settings.json. The agent's config, the two secret
 files and the systemd units are generated from it, so nobody edits them by hand.
 
+Both programs run as systemd services, so they keep running after the SSH session
+closes and come back after a reboot.
+
 Environment overrides (used by the tests and for dry runs):
-  NAMESTORAGE_CONFIG_DIR   default /etc/namestorage
+  NAMESTORAGE_CONFIG_DIR    default /etc/namestorage
+  NAMESTORAGE_SYSTEMD_DIR   default /etc/systemd/system
+  NAMESTORAGE_INSTALL_DIR   default /opt/namestorage
+  NAMESTORAGE_NO_SYSTEMD=1  write files only, do not touch systemd
 """
 import argparse
 import json
 import os
 import re
+import pwd
 import secrets
 import shutil
+import subprocess
 import sys
+import time
 
 SERVICE_USER = "nsagent"
+SERVICES = ("namestorage-signaling", "namestorage-agent")
 DEFAULT_ROOT = "/srv/storage/web"
 
 DEFAULTS = {
@@ -43,6 +53,18 @@ def cfg_dir():
 
 def path(name):
     return os.path.join(cfg_dir(), name)
+
+
+def unit_dir():
+    return os.environ.get("NAMESTORAGE_SYSTEMD_DIR", "/etc/systemd/system")
+
+
+def install_dir():
+    return os.environ.get("NAMESTORAGE_INSTALL_DIR", "/opt/namestorage")
+
+
+def use_systemd():
+    return os.environ.get("NAMESTORAGE_NO_SYSTEMD") != "1" and shutil.which("systemctl") is not None
 
 
 # ---------------------------------------------------------------- validation
@@ -258,13 +280,87 @@ def write_all(s):
         write_file(path(name), content, mode, group=SERVICE_USER)
 
 
+def unit_text(name, s):
+    """A systemd unit generated from the template in deploy/, adapted to these settings."""
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy", name + ".service")
+    with open(src) as f:
+        text = f.read()
+    text = text.replace("/opt/namestorage", install_dir()).replace("/etc/namestorage", cfg_dir())
+    if name == "namestorage-agent":
+        # the agent may only write inside the storage folder it was told to serve
+        text = re.sub(r"(?m)^ReadWritePaths=.*$", "ReadWritePaths=" + s["root"], text)
+        text = text.replace("After=network-online.target", "After=network-online.target namestorage-signaling.service")
+        if s["root"].startswith(("/home/", "/root/")):
+            text = text.replace("ProtectHome=true", "ProtectHome=false")
+    return text
+
+
+def ctl(*a):
+    return subprocess.run(["systemctl", *a], capture_output=True, text=True)
+
+
+def journal_tail(name, n=8):
+    return subprocess.run(["journalctl", "-u", name, "-n", str(n), "--no-pager"],
+                          capture_output=True, text=True).stdout
+
+
+def prepare_root(root):
+    """Create the storage folder and hand it to the service user. Returns a warning or None."""
+    os.makedirs(root, exist_ok=True)
+    if os.geteuid() != 0:
+        return None
+    try:
+        pw = pwd.getpwnam(SERVICE_USER)
+    except KeyError:
+        return None
+    os.chown(root, pw.pw_uid, pw.pw_gid)
+    with os.scandir(root) as it:
+        for i, e in enumerate(it):
+            if i > 2000:
+                break
+            if e.stat(follow_symlinks=False).st_uid != pw.pw_uid:
+                return (f"Some items in {root} are not owned by {SERVICE_USER}, so the drive may not "
+                        f"be able to change them. Fix with: sudo chown -R {SERVICE_USER}:{SERVICE_USER} {root}")
+    return None
+
+
+def start_services(s):
+    """Install the units, enable them at boot, (re)start them and check they came up."""
+    for name in SERVICES:
+        write_file(os.path.join(unit_dir(), name + ".service"), unit_text(name, s), 0o644)
+    ctl("daemon-reload")
+    for name in SERVICES:
+        ctl("enable", name)
+        ctl("restart", name)
+    time.sleep(2)
+    failed = False
+    for name in SERVICES:
+        state = ctl("is-active", name).stdout.strip()
+        if state == "active":
+            print(f"  ok  {name} is running")
+        else:
+            failed = True
+            print(f"  x   {name} is {state or 'not running'}. Last log lines:")
+            print("\n".join("        " + line for line in journal_tail(name).splitlines()))
+    if failed:
+        raise CliError("a service did not start (see above). A common cause is the port being used by "
+                       "a program started by hand: stop it with Ctrl+C in its terminal, then run: "
+                       "namestorage restart")
+
+
 def apply(s):
-    """Validate, write every generated file. (Services are handled by later steps.)"""
+    """Validate, write every generated file, and (re)start the services."""
     gaps = missing(s)
     if gaps:
         raise CliError("missing: " + ", ".join(gaps))
-    os.makedirs(s["root"], exist_ok=True)
+    warning = prepare_root(s["root"])
     write_all(s)
+    print(f"Settings saved to {path('settings.json')}.")
+    if warning:
+        print("Note: " + warning)
+    if use_systemd():
+        print("Starting the services:")
+        start_services(s)
 
 
 # -------------------------------------------------------------------- wizard
@@ -385,7 +481,9 @@ def cmd_setup(args):
         print("Nothing was changed.")
         return 1
     apply(s)
-    print(f"Settings saved to {path('settings.json')}.")
+    if use_systemd():
+        print("\nBoth programs now run in the background. You can close this terminal; they keep "
+              "running and start again after a reboot.")
     return 0
 
 

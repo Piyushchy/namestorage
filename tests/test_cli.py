@@ -14,6 +14,9 @@ CID = "123456789-abcdef.apps.googleusercontent.com"
 def env(tmp_path, monkeypatch):
     cfg = tmp_path / "etc"
     monkeypatch.setenv("NAMESTORAGE_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("NAMESTORAGE_NO_SYSTEMD", "1")
+    monkeypatch.setenv("NAMESTORAGE_SYSTEMD_DIR", str(tmp_path / "units"))
+    monkeypatch.setenv("NAMESTORAGE_INSTALL_DIR", "/opt/ns-test")
     return cfg, tmp_path / "storage"
 
 
@@ -166,3 +169,60 @@ def test_show_hides_the_secret(env, capsys):
     assert cli.main(["show"]) == 0
     out = capsys.readouterr().out
     assert settings(cfg)["secret"] not in out and "hidden" in out
+
+
+# ----------------------------------------------------------------- services
+class FakeCtl:
+    def __init__(self, states=None):
+        self.calls, self.states = [], states or {}
+
+    def __call__(self, *a):
+        self.calls.append(a)
+        out = self.states.get(a[1], "active\n") if a[0] == "is-active" else ""
+        return type("R", (), {"stdout": out, "returncode": 0})()
+
+
+def test_units_follow_the_settings(env):
+    cfg, root = env
+    cli.main(setup_args(root))
+    s = settings(cfg)
+    agent = cli.unit_text("namestorage-agent", s)
+    assert f"ReadWritePaths={root}" in agent and "/srv/storage/web" not in agent
+    assert "ExecStart=/opt/ns-test/venv/bin/python -m namestorage.agent " + str(cfg / "agent.json") in agent
+    assert f"EnvironmentFile={cfg}/agent.env" in agent and "namestorage-signaling.service" in agent
+    assert "ProtectHome=true" in agent
+    sig = cli.unit_text("namestorage-signaling", s)
+    assert f"EnvironmentFile={cfg}/signaling.env" in sig and "-m namestorage.signaling" in sig
+    # a storage folder under /home needs ProtectHome off, or the agent could not see it
+    s["root"] = "/home/spark/drive"
+    assert "ProtectHome=false" in cli.unit_text("namestorage-agent", s)
+
+
+def test_setup_installs_enables_and_starts_both_services(env, monkeypatch, capsys):
+    cfg, root = env
+    monkeypatch.delenv("NAMESTORAGE_NO_SYSTEMD")
+    monkeypatch.setattr(cli.shutil, "which", lambda n: "/bin/systemctl")
+    fake = FakeCtl()
+    monkeypatch.setattr(cli, "ctl", fake)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    assert cli.main(setup_args(root)) == 0
+    units = cfg.parent / "units"
+    assert (units / "namestorage-agent.service").exists() and (units / "namestorage-signaling.service").exists()
+    verbs = [c[0] for c in fake.calls]
+    assert verbs[0] == "daemon-reload"
+    assert ("enable", "namestorage-signaling") in fake.calls and ("enable", "namestorage-agent") in fake.calls
+    assert ("restart", "namestorage-signaling") in fake.calls and ("restart", "namestorage-agent") in fake.calls
+    assert "close this terminal" in capsys.readouterr().out
+
+
+def test_a_service_that_fails_is_reported_with_its_log(env, monkeypatch, capsys):
+    cfg, root = env
+    monkeypatch.delenv("NAMESTORAGE_NO_SYSTEMD")
+    monkeypatch.setattr(cli.shutil, "which", lambda n: "/bin/systemctl")
+    monkeypatch.setattr(cli, "ctl", FakeCtl({"namestorage-signaling": "failed\n"}))
+    monkeypatch.setattr(cli, "journal_tail", lambda n, k=8: "OSError: [Errno 98] address already in use")
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    assert cli.main(setup_args(root)) == 1
+    cap = capsys.readouterr()
+    assert "namestorage-signaling is failed" in cap.out and "address already in use" in cap.out
+    assert "did not start" in cap.err
