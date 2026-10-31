@@ -94,14 +94,33 @@ All messages use the single data channel: JSON text for commands and replies, bi
 
 | Operation | Request | Behavior |
 |---|---|---|
-| `list` | `{op:"list", path}` | Returns files and folders (max 5000, folders first). Symlinks and temporary upload files are hidden. |
+| `list` | `{op:"list", path}` | Returns files and folders (max 5000, folders first), each with the upload record if there is one (`by`, `at`), plus the signed-in email and what this laptop allows (`caps`). Symlinks, temporary upload files and the records file are hidden. |
 | `download` | `{op:"download", path}` | Replies with the size, streams binary chunks, then `{done:true}`. A `cancel` message stops it. |
 | `upload_start` | `{op:"upload_start", path, name, size}` | Refused if uploads are disabled, another upload is running, the name is invalid or already exists, or free space would drop below `min_free_bytes`. Creates a hidden temp file `.name.xxxx.nspart` in the target folder. |
 | (chunks) | binary | Written to the temp file. If more bytes arrive than announced, the upload is aborted. |
 | `upload_end` | `{op:"upload_end"}` | Flushes and fsyncs. If the byte count matches, the temp file is hard-linked to the final name (which fails rather than overwriting) and the temp file is removed. If the size is wrong, the temp file is deleted. |
 | `mkdir` | `{op:"mkdir", path, name}` | Creates a folder (only when uploads are allowed). |
+| `delete` | `{op:"delete", path, name}` | Deletes one file or one **empty** folder (only when `allow_delete` is on). Refuses symlinks, anything outside the root, and the records file. |
 
 In the browser, Chrome and Edge stream downloads straight to disk through the File System Access API. Other browsers collect the whole file in memory first (see limitations).
+
+### Upload records (who uploaded what, and when)
+
+When a file is uploaded, or a folder is created, through the site, the agent writes the signed-in email and the time into a hidden JSON file, `.namestorage-meta.json`, in the root folder. The page shows these in the **Uploaded** and **By** columns.
+
+- The records file is hidden from listings and cannot be downloaded, uploaded over, deleted or created through the site.
+- Files that were put on the laptop some other way have no record. The page shows their last-modified time, dimmed, and "—" for the uploader.
+- A record is stored with the file's size and modification time. If the file is changed or replaced on the laptop behind the site's back, the record no longer matches and is ignored, so the page never attributes a different file to the wrong person.
+- Deleting a file through the site removes its record.
+- The record is a convenience log written by the agent, not a tamper-proof audit trail: anyone with shell access to the laptop can edit it.
+
+### Deleting
+
+Deleting is **off by default**. Turn it on with `"allow_delete": true` in `agent.json`. The page then shows a trash icon on each row and asks for confirmation. Only files and empty folders can be deleted (a folder with content is refused, so one click can never wipe a tree). Deletion is permanent: there is no recycle bin.
+
+### Share links
+
+Each row shows a share-link symbol. It is a placeholder and does nothing yet; see "Not included yet".
 
 ---
 
@@ -110,6 +129,7 @@ In the browser, Chrome and Edge stream downloads straight to disk through the Fi
 - **Google sign-in tokens are verified server-side**, not trusted from the page, against an **email allow-list**. The client ID itself is public and safe to commit; only your listed emails get in.
 - **Two independent allow-lists and checks.** The signaling server and the agent each check the email. The agent trusts the ticket only if it can verify the MAC with the shared secret.
 - **Tickets are bound to the browser's DTLS fingerprint**, expire in 2 minutes and cannot be replayed.
+- **Deleting is opt-in and limited.** It needs `allow_delete`, works on one file or one empty folder per request, never follows symlinks, and cannot touch the records file or anything outside the root.
 - **One folder only.** `..` is rejected, backslashes and NUL bytes are rejected, paths are resolved with `realpath` and must stay inside the root, symlinks are not listed. The root cannot be `/`. The agent should run as a dedicated low-privilege user (the systemd unit does this, with `ProtectSystem=strict`, `ProtectHome=true`, `NoNewPrivileges=true`, and write access only to the storage folder).
 - **Uploads never overwrite**, are written to a temp file and renamed only when complete and the size matches, and are refused when disk space is short.
 - **Signaling hardening.** Origin check, per-IP rate limit, 64 KB WebSocket message limit, 10 s to send the first message, 30 s for the agent to answer.
@@ -139,8 +159,9 @@ Stated plainly:
 8. **Google sign-in specifics.** The OAuth client's authorized JavaScript origins must contain the exact site origin. Because the portfolio repo uses the custom domain `piyushchy.is-a.dev`, GitHub serves this project at that domain, so the origin is `https://piyushchy.is-a.dev` (not `piyushchy.github.io`). If the consent screen is in "Testing" mode, only listed test users can sign in. The Google account you use must be the one in `ALLOWED_EMAILS`.
 9. **The origin is shared with the portfolio.** Anything hosted on that origin can attempt the login flow. The allow-list still applies, but a separate subdomain would isolate it better.
 10. **Funnel is public.** Anyone can reach the signaling URL. Bots will probe it (you will see `426 Upgrade Required` lines in the log; these are harmless plain-HTTP requests that the server rejects). Free-tier terms of Tailscale and Google can change; check current terms.
-11. **No delete, rename, move, share links or per-user folders** (see "Not included yet"). All allowed users see the same folder.
-12. **Not independently audited.** Do not use it for confidential or employer data.
+11. **No rename, move, share links or per-user folders** (see "Not included yet"). All allowed users see the same folder, and every allowed user can delete anything in it when deleting is enabled. Folders can only be deleted when empty.
+12. **Upload records are partial.** Only files and folders created through the site have an uploader and time. Anything added to the folder directly on the laptop shows only its modified time.
+13. **Not independently audited.** Do not use it for confidential or employer data.
 
 ---
 
@@ -165,7 +186,7 @@ git clone https://github.com/Piyushchy/namestorage.git
 cd namestorage
 python3 -m venv venv && . venv/bin/activate
 pip install -r requirements-agent.txt -r requirements-signaling.txt pytest pytest-asyncio
-pytest          # expect: 23 passed
+pytest          # expect: 25 passed
 ```
 
 ### 2. Create the Google sign-in client (in the browser)
@@ -302,6 +323,7 @@ Open the site, sign in with the allowed Google account, click Connect, and you s
 | `root` | required | Folder to serve. Must exist and not be `/`. |
 | `allowed_emails` | required | Emails the agent will accept in tickets. |
 | `allow_upload` | `false` if missing | Enables uploads and making folders. |
+| `allow_delete` | `false` if missing | Enables deleting files and empty folders. Existing installs must add this line to `/etc/namestorage/agent.json` and restart the agent. |
 | `min_free_bytes` | 1 GiB | Uploads are refused if free space would fall below this. |
 | `max_sessions` | 3 | Maximum concurrent browser sessions. |
 | `session_max_seconds` | 43200 | Maximum session length (12 h). |
@@ -359,6 +381,7 @@ Where files go: everything under `root` (default `/srv/storage/web`). Interrupte
 | `426 Upgrade Required` / `405` lines in the signaling log | Harmless: plain web requests (bots, a browser visiting the URL) rejected by the WebSocket server. |
 | Funnel says it is not enabled | Open the link it prints, enable Funnel and HTTPS for the tailnet, run the command again. |
 | Google asks for a billing account or card | Google changes its sign-up flow. If a card is required, this app cannot use Google login for free; a password or passkey login would have to replace it. |
+| "deleting is disabled on this laptop" | Add `"allow_delete": true` to `/etc/namestorage/agent.json` and run `sudo systemctl restart namestorage-agent`. |
 | Upload says "a file with that name already exists" | By design. Uploads never overwrite; rename the file or remove the old one on the laptop. |
 | Big download fails in Firefox or Safari | Browser memory limit (no File System Access API). Use Chrome or Edge. |
 
@@ -371,7 +394,7 @@ pip install -r requirements-agent.txt -r requirements-signaling.txt pytest pytes
 pytest
 ```
 
-23 tests cover path escapes (including symlinks), ticket forgery, expiry and mismatch, and a real WebRTC session on localhost: login, listing, download, a 3 MB chunked upload, refused overwrite, refused bad names, wrong login and wrong origin.
+25 tests cover path escapes (including symlinks), ticket forgery, expiry and mismatch, and a real WebRTC session on localhost: login, listing, download, a 3 MB chunked upload, refused overwrite, refused bad names, wrong login and wrong origin, upload records, and deleting (including refused escapes, symlinks and non-empty folders).
 
 **Not tested:** real Google tokens, real browsers, and NAT traversal over the real internet.
 
@@ -380,7 +403,7 @@ pytest
 ## Repository layout
 
 ```
-docs/                       website (GitHub Pages): index.html, app.js, config.js
+docs/                       website (GitHub Pages): index.html, style.css, app.js, config.js
 namestorage/
   signaling.py              signaling server
   agent.py                  laptop agent
@@ -401,4 +424,4 @@ pytest.ini
 
 ## Not included yet
 
-Delete and rename, resumable transfers, per-user folders, share links, a TURN relay, a login that does not depend on Google.
+Rename and move, recursive folder delete, a recycle bin, resumable transfers, per-user folders, working share links (the symbol is already in the page), a TURN relay, a login that does not depend on Google.
