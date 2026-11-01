@@ -17,6 +17,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("NAMESTORAGE_NO_SYSTEMD", "1")
     monkeypatch.setenv("NAMESTORAGE_SYSTEMD_DIR", str(tmp_path / "units"))
     monkeypatch.setenv("NAMESTORAGE_INSTALL_DIR", "/opt/ns-test")
+    # Never touch real users: pretend the service user does not exist unless a test says otherwise.
+    def no_such_user(name):
+        raise KeyError(name)
+    monkeypatch.setattr(cli.pwd, "getpwnam", no_such_user)
     return cfg, tmp_path / "storage"
 
 
