@@ -8,20 +8,38 @@ Live site (this setup): `https://piyushchy.is-a.dev/namestorage/` (GitHub Pages,
 
 ## Contents
 
-1. [How it works](#how-it-works)
-2. [Components](#components)
-3. [Connection workflow, step by step](#connection-workflow-step-by-step)
-4. [What happens during a download and an upload](#what-happens-during-a-download-and-an-upload)
-5. [Security model](#security-model)
-6. [Limitations](#limitations)
-7. [Requirements](#requirements)
-8. [Installation](#installation)
-9. [Configuration reference](#configuration-reference)
-10. [Running and maintaining it](#running-and-maintaining-it)
-11. [Troubleshooting](#troubleshooting)
-12. [Tests](#tests)
-13. [Repository layout](#repository-layout)
-14. [Not included yet](#not-included-yet)
+1. [Quick start](#quick-start)
+2. [How it works](#how-it-works)
+3. [Components](#components)
+4. [Connection workflow, step by step](#connection-workflow-step-by-step)
+5. [What happens during a download and an upload](#what-happens-during-a-download-and-an-upload)
+6. [Security model](#security-model)
+7. [Limitations](#limitations)
+8. [Requirements](#requirements)
+9. [Installation](#installation)
+10. [Command reference](#command-reference)
+11. [How it keeps running](#how-it-keeps-running)
+12. [Configuration reference](#configuration-reference)
+13. [Running and maintaining it](#running-and-maintaining-it)
+14. [Troubleshooting](#troubleshooting)
+15. [Manual installation (advanced)](#manual-installation-advanced)
+16. [Tests](#tests)
+17. [Repository layout](#repository-layout)
+18. [Not included yet](#not-included-yet)
+
+---
+
+## Quick start
+
+On an Ubuntu laptop (it can be over SSH):
+
+```bash
+git clone https://github.com/Piyushchy/namestorage.git
+cd namestorage
+./install.sh        # installs, then asks a few questions and starts everything
+```
+
+Before that, create a Google sign-in client ([step 1](#1-create-the-google-sign-in-client-in-the-browser)); afterwards put two values in `docs/config.js` and turn on GitHub Pages ([steps 3 and 4](#3-put-two-values-on-the-website)). Both programs then run in the background and survive closing the terminal and rebooting. Day to day you use `namestorage status`, `namestorage email add ...`, `namestorage doctor` and the other [commands](#command-reference).
 
 ---
 
@@ -59,6 +77,7 @@ In this setup the signaling server also runs on the same laptop and is published
 | `namestorage/agent.py` | The laptop (systemd service `namestorage-agent`) | Verifies tickets, accepts WebRTC sessions, serves one folder (list, download, upload, make folder). |
 | `namestorage/ticket.py` | Both servers | Creates and verifies HMAC-signed tickets bound to the browser's DTLS fingerprint. |
 | `namestorage/paths.py` | Agent | Keeps every path inside the root folder; validates file names. |
+| `namestorage/cli.py` and `install.sh` | The laptop | The installer and the `namestorage` command: setup wizard, settings, service control, health checks. Generates all config files and systemd units from one settings file. |
 | Tailscale Funnel | The laptop | Publishes `127.0.0.1:8765` at `https://<machine>.<tailnet>.ts.net/` (use `wss://` for the same address). |
 | Google OAuth client | Google Cloud Console | Lets the site use "Sign in with Google". The client ID is public. |
 
@@ -167,7 +186,7 @@ Stated plainly:
 
 ## Requirements
 
-- An Ubuntu (or similar Linux) machine that stays on, with Python 3.10+ (3.12 tested), `python3-venv`, `git`, `openssl`, `systemd`.
+- An Ubuntu (or similar Linux) machine that stays on. `install.sh` uses `apt`, so it targets Ubuntu and Debian; on other distributions install the packages yourself and run `NS_SKIP_APT=1 ./install.sh`. It needs `sudo`. Requires Python 3.10+ (3.12 tested), `python3-venv`, `git`, `openssl`, `systemd`.
 - A GitHub account (free) for the repo and Pages.
 - A Google account and a Google Cloud project for the OAuth client ID. Creating the client ID is free, but Google controls its own sign-up flow; if it asks for a card, see Troubleshooting.
 - A free Tailscale account for Funnel (or any other way to expose a `wss://` endpoint, for example a VPS with Caddy).
@@ -176,133 +195,113 @@ Stated plainly:
 
 ## Installation
 
-Do these in order. Run the commands on the laptop unless stated.
+This takes about ten minutes on a fresh Ubuntu laptop. You never edit a config file.
 
-### 1. Get the code and run the tests
-
-```bash
-sudo apt update && sudo apt install -y git python3 python3-venv openssl
-git clone https://github.com/Piyushchy/namestorage.git
-cd namestorage
-python3 -m venv venv && . venv/bin/activate
-pip install -r requirements-agent.txt -r requirements-signaling.txt pytest pytest-asyncio
-pytest          # expect: 25 passed
-```
-
-### 2. Create the Google sign-in client (in the browser)
+### 1. Create the Google sign-in client (in the browser)
 
 1. Open Google Cloud Console, then the **Clients** page, and create or choose a project.
 2. Create a client of type **Web application**.
-3. Under **Authorized JavaScript origins** add the exact origin of your site with no trailing slash and no path:
-   - `https://piyushchy.is-a.dev` (the real one for this setup; also add `https://piyushchy.github.io` if you like)
-   - `http://localhost:8000` (only if you want to test locally)
-4. Save (changes can take a few minutes). Copy the **client ID**.
+3. Under **Authorized JavaScript origins** add the exact address your website loads from, with no trailing slash and no path. For a GitHub Pages site on a custom domain that is, for example, `https://piyushchy.is-a.dev`; otherwise `https://<username>.github.io`. (You can add more later.)
+4. Save, and copy the **client ID**. It looks like `1234567890-abc.apps.googleusercontent.com`.
 5. If the OAuth consent screen is in Testing mode, add your Gmail as a test user.
 
-Put the client ID in `docs/config.js` as `googleClientId` and commit it (it is public).
-
-### 3. Configure the signaling server
+### 2. Install and answer the questions (on the laptop)
 
 ```bash
-cd ~/namestorage
-cp deploy/signaling.env.example signaling.env
-openssl rand -hex 32                 # copy the output: this is your secret
-nano signaling.env
+git clone https://github.com/Piyushchy/namestorage.git
+cd namestorage
+./install.sh
 ```
 
-Set (see the [reference](#configuration-reference)):
+The installer installs the packages it needs (`python3`, `python3-venv`, `git`, `openssl`), creates the unprivileged `nsagent` user, installs the program under `/opt/namestorage`, adds the `namestorage` command, and starts the wizard. If you started the signaling server or the Funnel by hand earlier, stop them first (Ctrl+C), because the services need the same port.
 
-```
-GOOGLE_CLIENT_ID=<your id>.apps.googleusercontent.com
-ALLOWED_EMAILS=you@gmail.com
-ALLOWED_ORIGINS=https://piyushchy.is-a.dev,https://piyushchy.github.io
-NAMESTORAGE_SECRET=<the 64-character string>
-HOST=127.0.0.1
-PORT=8765
-TRUST_PROXY=1
+The wizard asks these questions. Press Enter to keep the value in brackets.
+
+| Question | What to answer |
+|---|---|
+| Google client ID | The ID from step 1. |
+| Allowed emails | Your Gmail, comma separated for several. Only these accounts can sign in. |
+| Allowed origins | The site address from step 1, for example `https://piyushchy.is-a.dev`. |
+| Storage folder | A dedicated folder, default `/srv/storage/web`. Never your home folder or `/`. |
+| Allow uploads / deleting | Y/n and y/N. Deleting is off by default. |
+| Publish with Tailscale Funnel? | **Yes** for a free public address. It installs and logs in to Tailscale if needed, enables Funnel (it prints a link if you must switch Funnel on in your Tailscale admin page), publishes the port in the background, and fills in the `wss://` address for you. Say no to type your own `wss://` address instead. |
+
+You do not choose or paste a secret: the wizard generates the shared secret and puts it where it is needed. At the end it starts both programs and checks that they are running.
+
+### 3. Put two values on the website
+
+The wizard finishes by printing the two lines to set in `docs/config.js` in your repository, for example:
+
+```js
+googleClientId: "1234567890-abc.apps.googleusercontent.com",
+signalingUrl: "wss://yourlaptop.tail1234.ts.net",
 ```
 
-Quick manual start to check it works:
+Edit `docs/config.js`, commit and push. You can print this block again at any time with `namestorage site-config`.
+
+### 4. Turn on the website
+
+In the GitHub repository go to **Settings > Pages > Deploy from a branch > `main` > `/docs` > Save**. After a minute or two the site is live (for a custom domain on your user site: `https://piyushchy.is-a.dev/namestorage/`).
+
+### 5. Check it works
 
 ```bash
-. venv/bin/activate
-set -a; . ./signaling.env; set +a
-python -m namestorage.signaling      # expect: server listening on 127.0.0.1:8765
-```
-
-### 4. Publish it with Tailscale Funnel
-
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up                    # open the printed link and sign in (free)
-sudo tailscale funnel --bg 8765      # if it says Funnel is off, open the link it prints, enable it, run again
-sudo tailscale funnel status         # shows https://<machine>.<tailnet>.ts.net/
-```
-
-Your signaling URL is that address with `wss://`, for example `wss://piyush.tail799736.ts.net`. (Without `--bg`, Funnel stops when the terminal closes.)
-
-Set it in `docs/config.js` as `signalingUrl`, and commit and push.
-
-### 5. Install the agent
-
-```bash
-cd ~/namestorage && git pull
-sudo useradd --system --home /opt/namestorage nsagent        # skip if the user exists
-sudo mkdir -p /opt/namestorage /etc/namestorage /srv/storage/web
-sudo rm -rf /opt/namestorage/* 
-sudo cp -r . /opt/namestorage                                # run this from INSIDE ~/namestorage
-cd /opt/namestorage
-sudo python3 -m venv venv
-sudo venv/bin/pip install -r requirements-agent.txt -r requirements-signaling.txt
-sudo cp deploy/agent.example.json /etc/namestorage/agent.json
-sudo nano /etc/namestorage/agent.json
-```
-
-In `agent.json` set `signaling_url` (the `wss://` address) and `allowed_emails`. Then:
-
-```bash
-echo "NAMESTORAGE_SECRET=<same secret as signaling.env>" | sudo tee /etc/namestorage/agent.env
-sudo chmod 600 /etc/namestorage/agent.env
-sudo chown -R nsagent:nsagent /srv/storage/web
-sudo cp deploy/namestorage-agent.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now namestorage-agent
-journalctl -u namestorage-agent -f     # expect: connected to signaling server
-```
-
-`root` in `agent.json` must be a **dedicated folder**, never your whole disk or home directory.
-
-### 6. Run the signaling server as a service (so it survives reboots)
-
-Edit `signaling.env` the same way, but keep the real one at `/etc/namestorage/signaling.env`:
-
-```bash
-sudo cp ~/namestorage/signaling.env /etc/namestorage/signaling.env
-sudo chmod 600 /etc/namestorage/signaling.env
-sudo cp /opt/namestorage/deploy/namestorage-signaling.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now namestorage-signaling
-journalctl -u namestorage-signaling -f     # expect: server listening on 127.0.0.1:8765
-```
-
-Stop any manually started copy first, or the port will be busy.
-
-### 7. Turn on the website
-
-In the GitHub repo: **Settings > Pages > Deploy from a branch > `main` > `/docs` > Save.** After a minute or two the site is at `https://<your pages domain>/namestorage/`. With a custom domain on your user site (as here), that is `https://piyushchy.is-a.dev/namestorage/`.
-
-### 8. First test
-
-```bash
+namestorage doctor                       # every line should say ok
 echo hello | sudo tee /srv/storage/web/test.txt
 sudo chown nsagent:nsagent /srv/storage/web/test.txt
 ```
 
-Open the site, sign in with the allowed Google account, click Connect, and you should see `test.txt`. Download it, then upload a small file.
+Open the site, sign in with an allowed Google account, and you should see `test.txt`. Download it, then upload a small file.
+
+---
+
+## Command reference
+
+Run `namestorage <command>`. It asks for your sudo password itself when it needs it. Every command that changes something checks the new value first, rewrites all generated files, and restarts both programs, so the settings can never disagree with each other. If a change is rejected, nothing is changed.
+
+| Command | What it does |
+|---|---|
+| `namestorage setup` | The wizard. Safe to run again: it shows your current answers as defaults and keeps the same secret. |
+| `namestorage setup --yes --client-id ID --email a@b.com --origin https://x.github.io --signaling-url wss://host --root /srv/files` | The same without questions, for scripts. Also `--allow-upload on\|off`, `--allow-delete on\|off`, `--funnel` or `--no-funnel`. Repeat `--email` and `--origin` for several. |
+| `namestorage status` | Are both services running and starting at boot, is the port listening, what the Funnel publishes, and the current settings. |
+| `namestorage doctor` | Checks the settings, secret, folder ownership, Python packages, that the generated files match the settings, both services, the port and the Funnel. Says what to do for each problem. |
+| `namestorage show` | Prints the settings. The secret is never shown. |
+| `namestorage start` / `stop` / `restart` | Control both programs. |
+| `namestorage logs [agent\|signaling] [-n 50] [-f]` | Show logs; `-f` keeps following (Ctrl+C to stop). |
+| `namestorage email add you@gmail.com friend@gmail.com` | Allow more accounts. Also `email remove ...` and `email list`. The last email cannot be removed. |
+| `namestorage origin add https://new.example.com` | Allow another website address. Also `origin remove ...` and `origin list`. |
+| `namestorage set allow-delete on` | Change one setting. Names: `client-id`, `signaling-url`, `root`, `allow-upload`, `allow-delete`, `min-free-bytes`, `max-sessions`, `session-max-seconds`, `port`. |
+| `namestorage rotate-secret` | New shared secret everywhere, then restart. Use it if the secret was ever exposed. |
+| `namestorage apply` | Regenerate every file from the settings and restart. Use it after anything was edited by hand. |
+| `namestorage update` | `git pull` the latest code, reinstall dependencies, regenerate and restart. If the repository history was rewritten, it tells you the two commands to reset. |
+| `namestorage site-config` | Prints the lines for `docs/config.js` and the origins to list in Google Cloud Console. |
+
+Examples:
+
+```bash
+namestorage email add friend@gmail.com      # let a friend sign in
+namestorage set allow-delete on             # turn on deleting
+namestorage logs signaling -f               # watch connection attempts live
+namestorage doctor                          # something wrong? start here
+```
+
+---
+
+## How it keeps running
+
+Closing your SSH terminal, or turning off the computer you SSH from, stops nothing. The two programs are **systemd services**, not processes of your terminal:
+
+- `namestorage-signaling` (the signaling server) and `namestorage-agent` (the file server) start at boot and restart automatically if they crash.
+- The Tailscale Funnel is published with `tailscale funnel --bg`, which Tailscale's own background service keeps alive, also across reboots.
+- The agent connects to the signaling server over the laptop's own loopback (`ws://127.0.0.1:8765`), so file access does not depend on the public address. Only browsers use the public `wss://` address.
+
+The laptop itself still has to be on and awake.
 
 ---
 
 ## Configuration reference
+
+You normally never edit these files. `/etc/namestorage/settings.json` is the single source of truth (root-only); `agent.json`, `agent.env`, `signaling.env` and the systemd units are generated from it by `namestorage setup`, `set`, `email`, `origin` and `apply`. Change values with those commands. This section describes what the generated files contain.
 
 ### Signaling server (`signaling.env`, environment variables)
 
@@ -342,24 +341,19 @@ Open the site, sign in with the allowed Google account, click Connect, and you s
 
 ## Running and maintaining it
 
+Everything is done with the `namestorage` command (see the [command reference](#command-reference)).
+
 ```bash
-# status and logs
-systemctl status namestorage-agent namestorage-signaling
-journalctl -u namestorage-agent -f
-journalctl -u namestorage-signaling -f
-sudo tailscale funnel status
-
-# restart after changing config
-sudo systemctl restart namestorage-signaling namestorage-agent
-
-# update the code
-cd ~/namestorage && git pull
-sudo cp -r . /opt/namestorage            # then restart both services
-
-# change the secret: edit BOTH /etc/namestorage/signaling.env and agent.env, then restart both
+namestorage status          # what is running
+namestorage doctor          # health check with fixes
+namestorage logs -f         # follow both logs
+namestorage update          # get new code and restart
+namestorage rotate-secret   # new shared secret
 ```
 
-Where files go: everything under `root` (default `/srv/storage/web`). Interrupted uploads leave nothing visible; hidden `*.nspart` files are cleaned up.
+Where things live: your files in the storage folder (default `/srv/storage/web`); settings in `/etc/namestorage/`; the program in `/opt/namestorage`. Interrupted uploads leave nothing visible, since hidden `*.nspart` files are cleaned up.
+
+Restarting disconnects anyone who is connected. They sign in again.
 
 ---
 
@@ -380,10 +374,148 @@ Where files go: everything under `root` (default `/srv/storage/web`). Interrupte
 | "Could not open a direct connection" | Peer-to-peer blocked by your network. Try another network (for example a phone hotspot); for a lasting fix add a TURN relay. |
 | `426 Upgrade Required` / `405` lines in the signaling log | Harmless: plain web requests (bots, a browser visiting the URL) rejected by the WebSocket server. |
 | Funnel says it is not enabled | Open the link it prints, enable Funnel and HTTPS for the tailnet, run the command again. |
+| `namestorage-signaling is failed` at the end of setup, log says "address already in use" | A signaling server started by hand (or an old copy) still holds port 8765. Stop it with Ctrl+C in its terminal, or `pkill -f namestorage.signaling`, then `namestorage restart`. |
+| Setup says Funnel did not start | Read the message above it. If it printed a link, open it and enable Funnel for your tailnet, then answer `y` to retry. Check later with `namestorage doctor`. |
+| `namestorage doctor`: "generated files match the settings" fails | A file under `/etc/namestorage` was edited by hand. Run `namestorage apply` to regenerate it. |
+| `namestorage update` says git pull failed | The repository history changed. Run the two commands it prints (`fetch` then `reset --hard origin/main`), then `namestorage update` again. |
+| `namestorage: command not found` | Run `./install.sh` again from the repository, or call `/usr/local/bin/namestorage` directly. |
+| The site works on one device but not another | Peer-to-peer can be blocked on some networks (see Limitations). Try another network. |
 | Google asks for a billing account or card | Google changes its sign-up flow. If a card is required, this app cannot use Google login for free; a password or passkey login would have to replace it. |
 | "deleting is disabled on this laptop" | Add `"allow_delete": true` to `/etc/namestorage/agent.json` and run `sudo systemctl restart namestorage-agent`. |
 | Upload says "a file with that name already exists" | By design. Uploads never overwrite; rename the file or remove the old one on the laptop. |
 | Big download fails in Firefox or Safari | Browser memory limit (no File System Access API). Use Chrome or Edge. |
+
+---
+
+## Manual installation (advanced)
+
+The installer does all of this for you. Use these steps only if you want to understand or control each one. They produce the same result, but you would then edit the files in `/etc/namestorage` yourself instead of using the `namestorage` command.
+
+Do these in order. Run the commands on the laptop unless stated.
+
+#### M1. Get the code and run the tests
+
+```bash
+sudo apt update && sudo apt install -y git python3 python3-venv openssl
+git clone https://github.com/Piyushchy/namestorage.git
+cd namestorage
+python3 -m venv venv && . venv/bin/activate
+pip install -r requirements-agent.txt -r requirements-signaling.txt pytest pytest-asyncio
+pytest          # expect: 25 passed
+```
+
+#### M2. Create the Google sign-in client (in the browser)
+
+1. Open Google Cloud Console, then the **Clients** page, and create or choose a project.
+2. Create a client of type **Web application**.
+3. Under **Authorized JavaScript origins** add the exact origin of your site with no trailing slash and no path:
+   - `https://piyushchy.is-a.dev` (the real one for this setup; also add `https://piyushchy.github.io` if you like)
+   - `http://localhost:8000` (only if you want to test locally)
+4. Save (changes can take a few minutes). Copy the **client ID**.
+5. If the OAuth consent screen is in Testing mode, add your Gmail as a test user.
+
+Put the client ID in `docs/config.js` as `googleClientId` and commit it (it is public).
+
+#### M3. Configure the signaling server
+
+```bash
+cd ~/namestorage
+cp deploy/signaling.env.example signaling.env
+openssl rand -hex 32                 # copy the output: this is your secret
+nano signaling.env
+```
+
+Set (see the [reference](#configuration-reference)):
+
+```
+GOOGLE_CLIENT_ID=<your id>.apps.googleusercontent.com
+ALLOWED_EMAILS=you@gmail.com
+ALLOWED_ORIGINS=https://piyushchy.is-a.dev,https://piyushchy.github.io
+NAMESTORAGE_SECRET=<the 64-character string>
+HOST=127.0.0.1
+PORT=8765
+TRUST_PROXY=1
+```
+
+Quick manual start to check it works:
+
+```bash
+. venv/bin/activate
+set -a; . ./signaling.env; set +a
+python -m namestorage.signaling      # expect: server listening on 127.0.0.1:8765
+```
+
+#### M4. Publish it with Tailscale Funnel
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up                    # open the printed link and sign in (free)
+sudo tailscale funnel --bg 8765      # if it says Funnel is off, open the link it prints, enable it, run again
+sudo tailscale funnel status         # shows https://<machine>.<tailnet>.ts.net/
+```
+
+Your signaling URL is that address with `wss://`, for example `wss://piyush.tail799736.ts.net`. (Without `--bg`, Funnel stops when the terminal closes.)
+
+Set it in `docs/config.js` as `signalingUrl`, and commit and push.
+
+#### M5. Install the agent
+
+```bash
+cd ~/namestorage && git pull
+sudo useradd --system --home /opt/namestorage nsagent        # skip if the user exists
+sudo mkdir -p /opt/namestorage /etc/namestorage /srv/storage/web
+sudo rm -rf /opt/namestorage/* 
+sudo cp -r . /opt/namestorage                                # run this from INSIDE ~/namestorage
+cd /opt/namestorage
+sudo python3 -m venv venv
+sudo venv/bin/pip install -r requirements-agent.txt -r requirements-signaling.txt
+sudo cp deploy/agent.example.json /etc/namestorage/agent.json
+sudo nano /etc/namestorage/agent.json
+```
+
+In `agent.json` set `signaling_url` (the `wss://` address) and `allowed_emails`. Then:
+
+```bash
+echo "NAMESTORAGE_SECRET=<same secret as signaling.env>" | sudo tee /etc/namestorage/agent.env
+sudo chmod 600 /etc/namestorage/agent.env
+sudo chown -R nsagent:nsagent /srv/storage/web
+sudo cp deploy/namestorage-agent.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now namestorage-agent
+journalctl -u namestorage-agent -f     # expect: connected to signaling server
+```
+
+`root` in `agent.json` must be a **dedicated folder**, never your whole disk or home directory.
+
+#### M6. Run the signaling server as a service (so it survives reboots)
+
+Edit `signaling.env` the same way, but keep the real one at `/etc/namestorage/signaling.env`:
+
+```bash
+sudo cp ~/namestorage/signaling.env /etc/namestorage/signaling.env
+sudo chmod 600 /etc/namestorage/signaling.env
+sudo cp /opt/namestorage/deploy/namestorage-signaling.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now namestorage-signaling
+journalctl -u namestorage-signaling -f     # expect: server listening on 127.0.0.1:8765
+```
+
+Stop any manually started copy first, or the port will be busy.
+
+#### M7. Turn on the website
+
+In the GitHub repo: **Settings > Pages > Deploy from a branch > `main` > `/docs` > Save.** After a minute or two the site is at `https://<your pages domain>/namestorage/`. With a custom domain on your user site (as here), that is `https://piyushchy.is-a.dev/namestorage/`.
+
+#### M8. First test
+
+```bash
+echo hello | sudo tee /srv/storage/web/test.txt
+sudo chown nsagent:nsagent /srv/storage/web/test.txt
+```
+
+Open the site, sign in with the allowed Google account, click Connect, and you should see `test.txt`. Download it, then upload a small file.
+
+---
 
 ---
 
@@ -394,7 +526,7 @@ pip install -r requirements-agent.txt -r requirements-signaling.txt pytest pytes
 pytest
 ```
 
-25 tests cover path escapes (including symlinks), ticket forgery, expiry and mismatch, and a real WebRTC session on localhost: login, listing, download, a 3 MB chunked upload, refused overwrite, refused bad names, wrong login and wrong origin, upload records, and deleting (including refused escapes, symlinks and non-empty folders).
+79 tests cover path escapes (including symlinks), ticket forgery, expiry and mismatch, and a real WebRTC session on localhost: login, listing, download, a 3 MB chunked upload, refused overwrite, refused bad names, wrong login and wrong origin, upload records, and deleting (including refused escapes, symlinks and non-empty folders), plus the command: validation, the wizard, generated files and units, Funnel setup against a fake Tailscale, and every management command. The command's tests run without root or systemd, using temporary folders.
 
 **Not tested:** real Google tokens, real browsers, and NAT traversal over the real internet.
 
@@ -409,12 +541,14 @@ namestorage/
   agent.py                  laptop agent
   ticket.py                 ticket creation and verification
   paths.py                  path and file-name safety
+  cli.py                    the `namestorage` command (wizard, settings, services, doctor)
+install.sh                  one-command installer
 deploy/
   signaling.env.example     signaling settings template
   agent.example.json        agent settings template
   namestorage-agent.service systemd unit for the agent
   namestorage-signaling.service  systemd unit for the signaling server
-tests/                      unit and end-to-end tests
+tests/                      unit and end-to-end tests (test_cli.py covers the command)
 requirements-agent.txt      agent dependencies
 requirements-signaling.txt  signaling dependencies
 pytest.ini
