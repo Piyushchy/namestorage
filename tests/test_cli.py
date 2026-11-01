@@ -311,3 +311,168 @@ def test_non_interactive_funnel_flag(env, monkeypatch):
     args = [a for a in setup_args(root) if a not in ("--signaling-url", "https://box.ts.net/")]
     assert cli.main(args + ["--funnel"]) == 0
     assert settings(cfg)["signaling_url"] == "wss://laptop.tail1234.ts.net"
+
+
+# --------------------------------------------------------- management commands
+@pytest.fixture
+def ready(env):
+    cfg, root = env
+    cli.main(setup_args(root))
+    return cfg, root
+
+
+def agent_cfg(cfg):
+    return json.loads((cfg / "agent.json").read_text())
+
+
+def test_set_changes_one_setting_and_regenerates_files(ready, capsys):
+    cfg, root = ready
+    assert cli.main(["set", "allow-delete", "on"]) == 0
+    assert settings(cfg)["allow_delete"] is True and agent_cfg(cfg)["allow_delete"] is True
+    assert cli.main(["set", "max-sessions", "5"]) == 0
+    assert agent_cfg(cfg)["max_sessions"] == 5
+    assert cli.main(["set", "signaling-url", "wss://other.example.com"]) == 0
+    assert settings(cfg)["signaling_url"] == "wss://other.example.com"
+    assert cli.main(["set", "port", "9100"]) == 0
+    assert cli.parse_env(str(cfg / "signaling.env"))["PORT"] == "9100"
+    assert agent_cfg(cfg)["signaling_url"] == "ws://127.0.0.1:9100"
+    assert "Funnel still points at the old port" in capsys.readouterr().out
+
+
+def test_set_rejects_bad_values_and_changes_nothing(ready, capsys):
+    cfg, root = ready
+    before = (cfg / "settings.json").read_text()
+    for args in (["set", "max-sessions", "0"], ["set", "max-sessions", "abc"], ["set", "allow-delete", "maybe"],
+                 ["set", "root", "/"], ["set", "nonsense", "1"], ["set", "signaling-url", "http://x"]):
+        assert cli.main(args) == 1, args
+    assert (cfg / "settings.json").read_text() == before
+    assert "unknown setting" in capsys.readouterr().err
+
+
+def test_email_add_remove_list(ready, capsys):
+    cfg, root = ready
+    assert cli.main(["email", "add", "New@Example.com", "third@example.com"]) == 0
+    assert settings(cfg)["allowed_emails"] == ["me@example.com", "new@example.com", "third@example.com"]
+    assert agent_cfg(cfg)["allowed_emails"] == settings(cfg)["allowed_emails"]
+    assert cli.parse_env(str(cfg / "signaling.env"))["ALLOWED_EMAILS"] == "me@example.com,new@example.com,third@example.com"
+    assert cli.main(["email", "add", "new@example.com"]) == 0           # adding twice is harmless
+    assert settings(cfg)["allowed_emails"].count("new@example.com") == 1
+    assert cli.main(["email", "remove", "new@example.com"]) == 0
+    capsys.readouterr()
+    assert cli.main(["email", "list"]) == 0
+    assert capsys.readouterr().out.split() == ["me@example.com", "third@example.com"]
+    assert cli.main(["email", "remove", "nobody@example.com"]) == 1
+
+
+def test_the_last_email_cannot_be_removed(ready, capsys):
+    cfg, root = ready
+    assert cli.main(["email", "remove", "me@example.com"]) == 1
+    assert "last email" in capsys.readouterr().err
+    assert settings(cfg)["allowed_emails"] == ["me@example.com"]
+    assert agent_cfg(cfg)["allowed_emails"] == ["me@example.com"]
+
+
+def test_origin_add_remove_and_validation(ready):
+    cfg, root = ready
+    assert cli.main(["origin", "add", "https://new.example.com/"]) == 0
+    assert cli.parse_env(str(cfg / "signaling.env"))["ALLOWED_ORIGINS"] == "https://me.github.io,https://new.example.com"
+    assert cli.main(["origin", "add", "https://bad.example.com/with/path"]) == 1
+    assert cli.main(["origin", "remove", "https://me.github.io"]) == 0
+    assert cli.main(["origin", "remove", "https://new.example.com"]) == 1      # would leave none
+
+
+def test_rotate_secret_changes_it_everywhere(ready):
+    cfg, root = ready
+    old = settings(cfg)["secret"]
+    assert cli.main(["rotate-secret"]) == 0
+    new = settings(cfg)["secret"]
+    assert new != old and len(new) == 64
+    assert cli.parse_env(str(cfg / "signaling.env"))["NAMESTORAGE_SECRET"] == new
+    assert cli.parse_env(str(cfg / "agent.env"))["NAMESTORAGE_SECRET"] == new
+
+
+def test_commands_before_setup_say_what_to_do(env, capsys):
+    for cmd in (["show"], ["status"], ["doctor"], ["set", "allow-delete", "on"], ["email", "list"], ["rotate-secret"]):
+        assert cli.main(cmd) == 1
+        assert "namestorage setup" in capsys.readouterr().err
+
+
+def test_apply_repairs_hand_edited_files(ready):
+    cfg, root = ready
+    (cfg / "agent.json").write_text("{}")
+    assert cli.main(["apply"]) == 0
+    assert agent_cfg(cfg)["root"] == str(root)
+
+
+def test_site_config_prints_the_two_lines_and_origins(ready, capsys):
+    capsys.readouterr()
+    assert cli.main(["site-config"]) == 0
+    out = capsys.readouterr().out
+    assert f'googleClientId: "{CID}"' in out and 'signalingUrl: "wss://box.ts.net"' in out
+    assert "https://me.github.io" in out and settings(ready[0])["secret"] not in out
+
+
+def test_setup_ends_with_next_steps(env, capsys):
+    cfg, root = env
+    cli.main(setup_args(root))
+    out = capsys.readouterr().out
+    assert "docs/config.js" in out and "Authorized JavaScript origins" in out
+
+
+def test_status_start_stop_restart(ready, monkeypatch, capsys):
+    monkeypatch.delenv("NAMESTORAGE_NO_SYSTEMD")
+    monkeypatch.setattr(cli.shutil, "which", lambda n: "/bin/systemctl" if n == "systemctl" else None)
+    fake = FakeCtl()
+    monkeypatch.setattr(cli, "ctl", fake)
+    monkeypatch.setattr(cli, "port_listening", lambda p: True)
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "namestorage-agent" in out and "active" in out and "listening" in out
+    fake.calls.clear()
+    assert cli.main(["stop"]) == 0
+    assert [c for c in fake.calls if c[0] == "stop"] == [("stop", "namestorage-agent"), ("stop", "namestorage-signaling")]
+    fake.calls.clear()
+    assert cli.main(["restart"]) == 0
+    assert [c for c in fake.calls if c[0] == "restart"] == [("restart", "namestorage-signaling"), ("restart", "namestorage-agent")]
+
+
+def test_logs_builds_the_journalctl_command(ready, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "exec_cmd", lambda cmd: seen.append(cmd))
+    cli.main(["logs", "agent", "-f", "-n", "20"])
+    cli.main(["logs"])
+    assert seen[0] == ["journalctl", "--no-pager", "-n", "20", "-u", "namestorage-agent", "-f"]
+    assert seen[1] == ["journalctl", "--no-pager", "-n", "50", "-u", "namestorage-signaling", "-u", "namestorage-agent"]
+
+
+def test_doctor_passes_when_healthy_and_flags_problems(ready, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "port_listening", lambda p: True)
+    monkeypatch.setattr(cli.pwd, "getpwnam", lambda n: type("P", (), {"pw_uid": os.getuid(), "pw_gid": 0})())
+    capsys.readouterr()
+    assert cli.main(["doctor"]) == 0
+    assert "Everything looks fine" in capsys.readouterr().out
+    cfg, root = ready
+    (cfg / "agent.json").write_text("{}")                  # edited by hand
+    monkeypatch.setattr(cli, "port_listening", lambda p: False)
+    assert cli.main(["doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL generated files match the settings" in out and "namestorage apply" in out
+    assert "FAIL the signaling server listens" in out
+
+
+def test_update_pulls_then_reapplies_with_the_new_code(ready, monkeypatch, tmp_path, capsys):
+    inst = tmp_path / "inst"
+    (inst / ".git").mkdir(parents=True)
+    monkeypatch.setenv("NAMESTORAGE_INSTALL_DIR", str(inst))
+    calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: calls.append((cmd, kw)) or type("R", (), {"returncode": 0})())
+    assert cli.main(["update"]) == 0
+    assert calls[0][0][:4] == ["git", "-C", str(inst), "pull"]
+    assert calls[1][0][0].endswith("venv/bin/pip")
+    assert calls[2][0][-3:] == ["-m", "namestorage.cli", "apply"] or calls[2][0][-1] == "apply"
+    assert calls[2][1]["env"]["PYTHONPATH"] == str(inst)
+
+
+def test_update_refuses_without_a_git_checkout(ready, capsys):
+    assert cli.main(["update"]) == 1
+    assert "not a git checkout" in capsys.readouterr().err

@@ -13,12 +13,15 @@ Environment overrides (used by the tests and for dry runs):
   NAMESTORAGE_NO_SYSTEMD=1  write files only, do not touch systemd
 """
 import argparse
+import copy
+import importlib.util
 import json
 import os
 import re
 import pwd
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -543,15 +546,258 @@ def cmd_setup(args):
     if use_systemd():
         print("\nBoth programs now run in the background. You can close this terminal; they keep "
               "running and start again after a reboot.")
+    print("\n" + next_steps(s))
     return 0
 
 
-def cmd_show(args):
+def require_settings():
     s = load()
     if s is None:
         raise CliError("not set up yet. Run: namestorage setup")
-    print(summary(s))
+    return s
+
+
+def next_steps(s):
+    origins = "\n".join(f"       {o}" for o in s["allowed_origins"])
+    return (
+        "Next steps (the website itself is on GitHub, so these two are done there):\n"
+        "  1. In docs/config.js in your repository, set these two lines, then commit and push:\n"
+        f'       googleClientId: "{s["google_client_id"]}",\n'
+        f'       signalingUrl: "{s["signaling_url"]}",\n'
+        "  2. In Google Cloud Console, open your Web application client and make sure these are listed\n"
+        "     under Authorized JavaScript origins:\n"
+        f"{origins}\n"
+        "  3. Open your site and sign in with an allowed account.\n"
+        "Check everything at any time with: namestorage doctor")
+
+
+def cmd_show(args):
+    print(summary(require_settings()))
     return 0
+
+
+def cmd_site_config(args):
+    print(next_steps(require_settings()))
+    return 0
+
+
+# ------------------------------------------------------------- change settings
+def int_range(lo, hi):
+    def conv(v):
+        try:
+            n = int(str(v).strip())
+        except ValueError:
+            raise ValueError("expected a whole number")
+        if not lo <= n <= hi:
+            raise ValueError(f"expected a number from {lo} to {hi}")
+        return n
+    return conv
+
+
+SCALARS = {
+    "client-id": ("google_client_id", norm_client_id),
+    "signaling-url": ("signaling_url", norm_ws_url),
+    "root": ("root", norm_root),
+    "allow-upload": ("allow_upload", norm_bool),
+    "allow-delete": ("allow_delete", norm_bool),
+    "min-free-bytes": ("min_free_bytes", int_range(0, 1 << 50)),
+    "max-sessions": ("max_sessions", int_range(1, 50)),
+    "session-max-seconds": ("session_max_seconds", int_range(60, 7 * 86400)),
+    "port": ("port", int_range(1024, 65535)),
+}
+
+
+def modify(change):
+    """Apply change(settings) to a copy, validate, write all files and restart. Nothing is
+    written if the change is rejected."""
+    new = copy.deepcopy(require_settings())
+    try:
+        change(new)
+    except ValueError as e:
+        raise CliError(str(e))
+    apply(new)
+    return new
+
+
+def cmd_set(args):
+    if args.key not in SCALARS:
+        raise CliError(f"unknown setting '{args.key}'. Choose one of: {', '.join(SCALARS)}")
+    field, norm = SCALARS[args.key]
+    try:
+        value = norm(args.value)
+    except ValueError as e:
+        raise CliError(f"{args.key}: {e}")
+    old = require_settings()
+    modify(lambda s: s.__setitem__(field, value))
+    print(f"{args.key}: {old[field]} -> {value}")
+    if args.key == "port":
+        print("The Funnel still points at the old port. Run: namestorage setup")
+    if args.key == "root":
+        print(f"Existing files stay in {old['root']}; they are not moved.")
+    return 0
+
+
+def list_command(field, norm, noun):
+    def run_it(args):
+        s = require_settings()
+        if args.action == "list":
+            print("\n".join(s[field]) or f"(no {noun}s)")
+            return 0
+        if not args.values:
+            raise CliError(f"give at least one {noun}")
+        try:
+            values = [norm(v) for v in args.values]
+        except ValueError as e:
+            raise CliError(str(e))
+
+        def change(new):
+            for v in values:
+                if args.action == "add":
+                    if v not in new[field]:
+                        new[field].append(v)
+                else:
+                    if v not in new[field]:
+                        raise ValueError(f"{v} is not in the list")
+                    new[field].remove(v)
+            if not new[field]:
+                raise ValueError(f"cannot remove the last {noun}: nobody could sign in or connect")
+        modify(change)
+        print(f"{noun}s now: {', '.join(load()[field])}")
+        return 0
+    return run_it
+
+
+def cmd_apply(args):
+    apply(require_settings())
+    return 0
+
+
+def cmd_rotate_secret(args):
+    modify(lambda s: s.__setitem__("secret", secrets.token_hex(32)))
+    print("A new secret was generated and both programs restarted. The old one no longer works anywhere.")
+    return 0
+
+
+# ------------------------------------------------------------ service control
+def service_states():
+    return {n: (ctl("is-active", n).stdout.strip() or "unknown", ctl("is-enabled", n).stdout.strip() or "unknown")
+            for n in SERVICES}
+
+
+def port_listening(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def cmd_status(args):
+    s = require_settings()
+    if use_systemd():
+        for name, (active, enabled) in service_states().items():
+            print(f"  {name:24} {active:10} (starts at boot: {enabled})")
+    else:
+        print("  systemd is not available here")
+    print(f"  signaling port {s['port']:<10} {'listening' if port_listening(s['port']) else 'not listening'}")
+    ts = shutil.which("tailscale")
+    if ts:
+        out = run([ts, "funnel", "status"]).stdout.strip()
+        print("  tailscale funnel:\n" + "\n".join("    " + line for line in (out or "not published").splitlines()))
+    print("\n" + summary(s))
+    return 0
+
+
+def cmd_control(verb):
+    def run_it(args):
+        names = SERVICES if verb != "stop" else tuple(reversed(SERVICES))
+        for name in names:
+            ctl(verb, name)
+        for name, (active, _) in service_states().items():
+            print(f"  {name:24} {active}")
+        return 0
+    return run_it
+
+
+def exec_cmd(cmd):
+    os.execvp(cmd[0], cmd)
+
+
+def cmd_logs(args):
+    units = SERVICES if args.which == "all" else ("namestorage-" + args.which,)
+    cmd = ["journalctl", "--no-pager", "-n", str(args.lines)]
+    for u in units:
+        cmd += ["-u", u]
+    if args.follow:
+        cmd.append("-f")
+    exec_cmd(cmd)
+
+
+def cmd_update(args):
+    d = install_dir()
+    if not os.path.isdir(os.path.join(d, ".git")):
+        raise CliError(f"{d} is not a git checkout, so it cannot update itself. "
+                       "Clone the repository again and run ./install.sh")
+    if subprocess.run(["git", "-C", d, "pull", "--ff-only"]).returncode != 0:
+        raise CliError("git pull failed. If the repository history was rewritten, run: "
+                       f"sudo git -C {d} fetch origin && sudo git -C {d} reset --hard origin/main")
+    subprocess.run([os.path.join(d, "venv", "bin", "pip"), "install", "-q",
+                    "-r", os.path.join(d, "requirements-agent.txt"),
+                    "-r", os.path.join(d, "requirements-signaling.txt")], check=False)
+    # re-render with the NEW code, not the copy of this program that is already running
+    env = dict(os.environ, PYTHONPATH=d)
+    if subprocess.run([sys.executable, "-m", "namestorage.cli", "apply"], env=env).returncode != 0:
+        raise CliError("updated the code, but restarting failed. See the messages above.")
+    print("Updated and restarted.")
+    return 0
+
+
+# -------------------------------------------------------------------- doctor
+def doctor_checks(s):
+    """(ok, what was checked, what to do if it failed)"""
+    checks = []
+    gaps = missing(s)
+    checks.append((not gaps, "all required settings are present", "missing: " + ", ".join(gaps) + ". Run: namestorage setup"))
+    checks.append((len(s["secret"]) >= 32, "the shared secret is long enough", "Run: namestorage rotate-secret"))
+    checks.append((os.path.isdir(s["root"]), f"storage folder {s['root']} exists", "Run: namestorage apply"))
+    try:
+        uid = pwd.getpwnam(SERVICE_USER).pw_uid
+        owned = os.path.isdir(s["root"]) and os.stat(s["root"]).st_uid == uid
+        checks.append((owned, f"storage folder is owned by {SERVICE_USER}",
+                       f"Run: sudo chown -R {SERVICE_USER}:{SERVICE_USER} {s['root']}"))
+    except KeyError:
+        checks.append((False, f"the {SERVICE_USER} user exists", "Run ./install.sh"))
+    for mod in ("aiortc", "websockets", "google.auth"):
+        try:
+            found = importlib.util.find_spec(mod) is not None
+        except (ImportError, ValueError):
+            found = False
+        checks.append((found, f"python package {mod} is installed", "Run: namestorage update"))
+    drift = [n for n, (content, _) in render_files(s).items()
+             if not os.path.exists(path(n)) or open(path(n)).read() != content]
+    checks.append((not drift, "generated files match the settings",
+                   f"{', '.join(drift)} differ (edited by hand?). Run: namestorage apply"))
+    if use_systemd():
+        for name, (active, enabled) in service_states().items():
+            checks.append((active == "active", f"{name} is running", f"See: namestorage logs {name.split('-')[1]}"))
+            checks.append((enabled == "enabled", f"{name} starts at boot", "Run: namestorage apply"))
+    checks.append((port_listening(s["port"]), f"the signaling server listens on port {s['port']}",
+                   "See: namestorage logs signaling (is something else using the port?)"))
+    ts = shutil.which("tailscale")
+    if ts and s["signaling_url"].endswith(".ts.net"):
+        out = run([ts, "funnel", "status"]).stdout
+        checks.append((f"127.0.0.1:{s['port']}" in out, "Tailscale Funnel publishes the signaling port",
+                       "Run: namestorage setup (and pick Funnel)"))
+    return checks
+
+
+def cmd_doctor(args):
+    checks = doctor_checks(require_settings())
+    for ok, what, fix in checks:
+        print(f"  {'ok  ' if ok else 'FAIL'} {what}" + ("" if ok else f"\n       -> {fix}"))
+    bad = sum(1 for ok, *_ in checks if not ok)
+    print("\nEverything looks fine." if not bad else f"\n{bad} problem(s) found.")
+    return 1 if bad else 0
 
 
 # ---------------------------------------------------------------------- main
@@ -591,6 +837,32 @@ def build_parser():
     s.set_defaults(func=cmd_setup)
 
     sub.add_parser("show", help="print the current settings (secret hidden)").set_defaults(func=cmd_show)
+    sub.add_parser("status", help="are the services running, and what are the settings").set_defaults(func=cmd_status)
+    for verb in ("start", "stop", "restart"):
+        sub.add_parser(verb, help=f"{verb} both services").set_defaults(func=cmd_control(verb))
+    lg = sub.add_parser("logs", help="show the logs")
+    lg.add_argument("which", nargs="?", choices=["all", "agent", "signaling"], default="all")
+    lg.add_argument("-n", "--lines", type=int, default=50)
+    lg.add_argument("-f", "--follow", action="store_true", help="keep following (Ctrl+C to stop)")
+    lg.set_defaults(func=cmd_logs)
+
+    st = sub.add_parser("set", help="change one setting: namestorage set allow-delete on")
+    st.add_argument("key", metavar="setting", help="one of: " + ", ".join(SCALARS))
+    st.add_argument("value")
+    st.set_defaults(func=cmd_set)
+
+    for name, field, norm, noun in (("email", "allowed_emails", norm_email, "email"),
+                                    ("origin", "allowed_origins", norm_origin, "origin")):
+        sp = sub.add_parser(name, help=f"add, remove or list allowed {noun}s")
+        sp.add_argument("action", choices=["add", "remove", "list"])
+        sp.add_argument("values", nargs="*")
+        sp.set_defaults(func=list_command(field, norm, noun))
+
+    sub.add_parser("rotate-secret", help="generate a new shared secret and restart").set_defaults(func=cmd_rotate_secret)
+    sub.add_parser("apply", help="regenerate all files from the settings and restart").set_defaults(func=cmd_apply)
+    sub.add_parser("update", help="pull the latest code, reinstall dependencies and restart").set_defaults(func=cmd_update)
+    sub.add_parser("doctor", help="check that everything is set up correctly").set_defaults(func=cmd_doctor)
+    sub.add_parser("site-config", help="what to put in docs/config.js and Google Console").set_defaults(func=cmd_site_config)
     return p
 
 
