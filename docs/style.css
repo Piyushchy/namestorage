@@ -118,10 +118,10 @@ progress::-webkit-progress-value { background: var(--accent); }
 progress::-moz-progress-bar { background: var(--accent); }
 
 .listing { position: relative; }
-.listing.over { outline: 2px dashed var(--accent); outline-offset: -6px; }
-.veil { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: color-mix(in srgb, var(--surface) 88%, transparent); color: var(--accent); font-weight: 650; pointer-events: none; }
-.listing.over .veil { display: flex; }
-
+.dropveil { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 24px; background: color-mix(in srgb, var(--bg) 80%, transparent); backdrop-filter: blur(2px); pointer-events: none; }
+.dropveil[hidden] { display: none; }
+.dropbox { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 36px 44px; max-width: 480px; text-align: center; border: 2px dashed var(--accent); border-radius: 16px; background: var(--surface); color: var(--accent); font-weight: 650; }
+.dropveil[data-state="blocked"] .dropbox { border-color: var(--line-strong); color: var(--mute); }
 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 th, td { text-align: left; padding: 0 16px; height: 52px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 tbody tr:last-child td { border-bottom: 0; }
