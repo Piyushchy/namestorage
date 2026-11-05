@@ -102,6 +102,9 @@ class Session:
             return self.op_upload_start(rid, req)
         if op == "upload_end":
             return self.op_upload_end(rid)
+        if op == "upload_abort":  # the page gave up on an upload: drop the partial file (idempotent)
+            self.abort_upload()
+            return self.send({"id": rid, "ok": True})
         if op == "mkdir":
             return self.op_mkdir(rid, req)
         if op == "delete":

@@ -213,3 +213,23 @@ async def test_delete_disabled_by_default(stack):
     assert not (await b.call("delete", path="/", name="hello.txt"))["ok"]
     assert (root / "hello.txt").exists()
     await b.pc.close()
+
+
+async def test_upload_abort_cleans_up(stack):
+    url, root, tmp, hub = stack
+    b = Browser()
+    assert (await b.open(url, ME))["type"] == "answer"
+    # nothing running: aborting is harmless
+    assert (await b.call("upload_abort"))["ok"]
+    # a half-sent upload is dropped, its name is free again, and the next upload works
+    assert (await b.call("upload_start", path="/", name="half.bin", size=10))["ok"]
+    b.dc.send(b"abc")
+    assert (await b.call("upload_abort"))["ok"]
+    assert not (root / "half.bin").exists() and not list(root.rglob("*.nspart"))
+    assert (await b.call("upload_start", path="/", name="half.bin", size=3))["ok"]
+    b.dc.send(b"abc")
+    assert (await b.call("upload_end"))["ok"]
+    assert (root / "half.bin").read_bytes() == b"abc"
+    # abort never touches a finished file
+    assert (await b.call("upload_abort"))["ok"] and (root / "half.bin").exists()
+    await b.pc.close()
