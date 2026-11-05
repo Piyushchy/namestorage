@@ -118,10 +118,14 @@ async function connect() {
     setState("Connected directly", "ok");
     await refresh("/");
   } catch (e) {
+    // Closing the connection fires the data channel's close handler, which would replace this
+    // error with a generic "Disconnected" and hide the retry button. Detach it first.
+    if (dc) dc.onclose = null;
+    if (pc) pc.close();
+    pc = dc = null;
     setState("Not connected", "err");
     say(e.message, "err");
     $("connect").hidden = false;
-    if (pc) pc.close();
   }
 }
 $("connect").addEventListener("click", connect);
