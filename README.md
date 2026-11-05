@@ -118,10 +118,16 @@ All messages use the single data channel: JSON text for commands and replies, bi
 | `upload_start` | `{op:"upload_start", path, name, size}` | Refused if uploads are disabled, another upload is running, the name is invalid or already exists, or free space would drop below `min_free_bytes`. Creates a hidden temp file `.name.xxxx.nspart` in the target folder. |
 | (chunks) | binary | Written to the temp file. If more bytes arrive than announced, the upload is aborted. |
 | `upload_end` | `{op:"upload_end"}` | Flushes and fsyncs. If the byte count matches, the temp file is hard-linked to the final name (which fails rather than overwriting) and the temp file is removed. If the size is wrong, the temp file is deleted. |
+| `upload_abort` | `{op:"upload_abort"}` | Sent by the page when an upload fails or is cancelled part-way. Deletes the half-written temp file so the name is free again. Harmless when nothing is running. |
 | `mkdir` | `{op:"mkdir", path, name}` | Creates a folder (only when uploads are allowed). |
 | `delete` | `{op:"delete", path, name}` | Deletes one file or one **empty** folder (only when `allow_delete` is on). Refuses symlinks, anything outside the root, and the records file. |
 
 In the browser, Chrome and Edge stream downloads straight to disk through the File System Access API. Other browsers collect the whole file in memory first (see limitations).
+
+### Drag and drop
+Drag files from your computer onto **anywhere on the page**. A full-page overlay shows what will happen: *Drop to upload to <folder>* when it will work, or why it will not (*Sign in to upload files*, *Uploads are turned off on this drive*, *Wait for the current transfer to finish*). Files dropped outside the list never make the browser open them. Dragging text or links is ignored.
+
+Dropping uses exactly the same path as the Upload button, so nothing is bypassed: the laptop still checks that uploads are enabled, the sign-in, the file name, that the name is free, and the free-space limit. Several files go up one after another with "Uploading 2 of 5". One bad file does not stop the others; at the end the page lists what was not uploaded and why (for example *already exists*). **Cancel** stops the current batch and removes the partly sent file. Folders cannot be dropped; they are reported and skipped (create the folder on the page and drop the files into it).
 
 ### Upload records (who uploaded what, and when)
 
@@ -178,7 +184,7 @@ Stated plainly:
 8. **Google sign-in specifics.** The OAuth client's authorized JavaScript origins must contain the exact site origin. Because the portfolio repo uses the custom domain `piyushchy.is-a.dev`, GitHub serves this project at that domain, so the origin is `https://piyushchy.is-a.dev` (not `piyushchy.github.io`). If the consent screen is in "Testing" mode, only listed test users can sign in. The Google account you use must be the one in `ALLOWED_EMAILS`.
 9. **The origin is shared with the portfolio.** Anything hosted on that origin can attempt the login flow. The allow-list still applies, but a separate subdomain would isolate it better.
 10. **Funnel is public.** Anyone can reach the signaling URL. Bots will probe it (you will see `426 Upgrade Required` lines in the log; these are harmless plain-HTTP requests that the server rejects). Free-tier terms of Tailscale and Google can change; check current terms.
-11. **No rename, move, share links or per-user folders** (see "Not included yet"). All allowed users see the same folder, and every allowed user can delete anything in it when deleting is enabled. Folders can only be deleted when empty.
+11. **No rename, move, share links or per-user folders** (see "Not included yet"). All allowed users see the same folder, and every allowed user can delete anything in it when deleting is enabled. Folders can only be deleted when empty, and folders cannot be uploaded by drag and drop (files only).
 12. **Upload records are partial.** Only files and folders created through the site have an uploader and time. Anything added to the folder directly on the laptop shows only its modified time.
 13. **Not independently audited.** Do not use it for confidential or employer data.
 
@@ -526,7 +532,7 @@ pip install -r requirements-agent.txt -r requirements-signaling.txt pytest pytes
 pytest
 ```
 
-79 tests cover path escapes (including symlinks), ticket forgery, expiry and mismatch, and a real WebRTC session on localhost: login, listing, download, a 3 MB chunked upload, refused overwrite, refused bad names, wrong login and wrong origin, upload records, and deleting (including refused escapes, symlinks and non-empty folders), plus the command: validation, the wizard, generated files and units, Funnel setup against a fake Tailscale, and every management command. The command's tests run without root or systemd, using temporary folders.
+80 tests cover path escapes (including symlinks), ticket forgery, expiry and mismatch, and a real WebRTC session on localhost: login, listing, download, a 3 MB chunked upload, refused overwrite, refused bad names, wrong login and wrong origin, upload records, deleting (including refused escapes, symlinks and non-empty folders) and cancelling an upload, plus the command: validation, the wizard, generated files and units, Funnel setup against a fake Tailscale, and every management command. The command's tests run without root or systemd, using temporary folders.
 
 **Not tested:** real Google tokens, real browsers, and NAT traversal over the real internet.
 
