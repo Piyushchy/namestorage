@@ -383,31 +383,59 @@ async function download(path, name) {
   } finally { dl = null; busy = false; $("cancel").hidden = true; progress(0, 0); }
 }
 
+let stop = false;  // set by Cancel; checked between chunks
+
 async function upload(file) {
   await call("upload_start", { path: curPath, name: file.name, size: file.size });
-  let off = 0;
-  while (off < file.size) {
-    const buf = await file.slice(off, off + (1 << 20)).arrayBuffer();
-    for (let i = 0; i < buf.byteLength; i += CH) {
-      while (dc.bufferedAmount > (1 << 20)) await sleep(10);
-      dc.send(buf.slice(i, i + CH));
+  try {
+    let off = 0;
+    while (off < file.size) {
+      const buf = await file.slice(off, off + (1 << 20)).arrayBuffer();
+      for (let i = 0; i < buf.byteLength; i += CH) {
+        while (dc.bufferedAmount > (1 << 20) && !stop) await sleep(10);
+        if (stop) throw new Error("cancelled");
+        dc.send(buf.slice(i, i + CH));
+      }
+      off += buf.byteLength;
+      progress(off, file.size, "Uploading " + file.name);
     }
-    off += buf.byteLength;
-    progress(off, file.size, "Uploading " + file.name);
+    await call("upload_end");
+  } catch (e) {
+    // Tell the laptop to throw the partial file away so the name is free again.
+    if (dc && dc.readyState === "open") dc.send(JSON.stringify({ id: nextId++, op: "upload_abort" }));
+    throw e;
   }
-  await call("upload_end");
 }
 
-async function uploadMany(files) {
+const list = (names) => names.length > 3 ? names.slice(0, 3).join(", ") + " and " + (names.length - 3) + " more" : names.join(", ");
+
+/* One bad file never stops the rest: each is tried, then the outcome is summarised. */
+async function uploadMany(files, skipped = []) {
   const taken = new Set(entries.map((e) => e.name));
-  const clash = files.find((f) => taken.has(f.name));
-  if (clash) return say(`"${clash.name}" already exists here. Uploads never overwrite; rename it or delete the old one first.`, "err");
-  busy = true; say("");
+  const failed = skipped.slice(), todo = [];
+  for (const f of files) {
+    if (taken.has(f.name)) failed.push(f.name + " (already exists)");
+    else { taken.add(f.name); todo.push(f); }
+  }
+  busy = true; stop = false; $("cancel").hidden = false; say("");
+  let ok = 0, cancelled = false;
   try {
-    for (const f of files) { progress(0, f.size, "Uploading " + f.name); await upload(f); }
-    say(files.length === 1 ? "Uploaded " + files[0].name : "Uploaded " + files.length + " files", "ok");
-    await refresh(curPath);
-  } finally { busy = false; progress(0, 0); }
+    for (let n = 0; n < todo.length; n++) {
+      const f = todo[n], tag = todo.length > 1 ? `Uploading ${n + 1} of ${todo.length}: ` : "Uploading ";
+      progress(0, f.size, tag + f.name);
+      try { await upload(f); ok++; }
+      catch (e) {
+        if (stop) { cancelled = true; break; }
+        failed.push(f.name + " (" + e.message + ")");
+        if (!dc || dc.readyState !== "open") break;
+      }
+    }
+  } finally { busy = false; stop = false; $("cancel").hidden = true; progress(0, 0); }
+  if (dc && dc.readyState === "open") await refresh(curPath);
+  const head = ok === 1 && !failed.length && todo.length === 1 ? "Uploaded " + todo[0].name : ok ? "Uploaded " + ok + (ok === 1 ? " file" : " files") : "";
+  if (cancelled) say((head ? head + ". " : "") + "Upload cancelled.", ok ? "ok" : "");
+  else if (failed.length) say((head ? head + ". " : "") + "Not uploaded: " + list(failed), "err");
+  else say(head, "ok");
 }
 
 $("up").onclick = () => $("picker").click();
@@ -416,13 +444,57 @@ $("mk").onclick = () => guarded(async () => {
   const name = prompt("Folder name:");
   if (name) { await call("mkdir", { path: curPath, name }); say("Created folder " + name, "ok"); await refresh(curPath); }
 });
-$("cancel").onclick = () => { if (dc && dc.readyState === "open") dc.send(JSON.stringify({ op: "cancel" })); };
-
-const drop = $("drop");
-drop.ondragover = (e) => { e.preventDefault(); if (caps.upload) drop.classList.add("over"); };
-drop.ondragleave = (e) => { if (!drop.contains(e.relatedTarget)) drop.classList.remove("over"); };
-drop.ondrop = (e) => {
-  e.preventDefault(); drop.classList.remove("over");
-  const f = [...e.dataTransfer.files];
-  if (f.length && caps.upload) guarded(() => uploadMany(f));
+$("cancel").onclick = () => {
+  if (dl) { if (dc && dc.readyState === "open") dc.send(JSON.stringify({ op: "cancel" })); }
+  else stop = true;
 };
+
+/* ---------- drag and drop: the whole page is the drop target ---------- */
+const veil = $("dropveil");
+let depth = 0;
+const hasFiles = (e) => e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files");
+
+function dropState() {
+  if (!dc || dc.readyState !== "open") return { ok: false, text: "Sign in to upload files" };
+  if (!caps.upload) return { ok: false, text: "Uploads are turned off on this drive" };
+  if (busy) return { ok: false, text: "Wait for the current transfer to finish" };
+  return { ok: true, text: "Drop to upload to " + (curPath === "/" ? "the top folder" : curPath) };
+}
+function showVeil() {
+  const s = dropState();
+  veil.dataset.state = s.ok ? "valid" : "blocked";
+  $("dropmsg").textContent = s.text;
+  veil.hidden = false;
+}
+function hideVeil() { depth = 0; veil.hidden = true; }
+
+document.addEventListener("dragenter", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); depth++; showVeil();
+});
+document.addEventListener("dragover", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();  // without this the browser would open the file instead
+  e.dataTransfer.dropEffect = dropState().ok ? "copy" : "none";
+});
+document.addEventListener("dragleave", (e) => {
+  if (!hasFiles(e)) return;
+  if (--depth <= 0) hideVeil();
+});
+document.addEventListener("drop", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); hideVeil();
+  const s = dropState();
+  if (!s.ok) return say(s.text + ".", "err");
+  // Read everything now: the browser empties the drop data once this handler returns.
+  const files = [], folders = [];
+  const items = [...(e.dataTransfer.items || [])].filter((i) => i.kind === "file");
+  if (items.length) {
+    for (const it of items) {
+      const ent = it.webkitGetAsEntry && it.webkitGetAsEntry();
+      if (ent && ent.isDirectory) folders.push(ent.name + " (folders cannot be uploaded)");
+      else { const f = it.getAsFile(); if (f) files.push(f); }
+    }
+  } else files.push(...e.dataTransfer.files);
+  if (files.length || folders.length) guarded(() => uploadMany(files, folders));
+});
